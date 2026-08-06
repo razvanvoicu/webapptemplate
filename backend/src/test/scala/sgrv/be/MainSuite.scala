@@ -1,6 +1,6 @@
 package sgrv.be
 
-import zio.{Chunk, Runtime, Task, Unsafe}
+import zio.{Chunk, Runtime, Task, Unsafe, ZIO}
 import zio.http.{Header, MediaType, Request, Status, URL}
 
 class MainSuite extends munit.FunSuite:
@@ -32,8 +32,8 @@ class MainSuite extends munit.FunSuite:
       "request_size" -> "0"
     )
 
-    assertEquals(Main.requestSummary(annotations), Some(" [GET /debug -> 200 70ms]"))
-    assertEquals(Main.requestSummary(Map.empty), None)
+    assertEquals(LoggerConfig.requestSummary(annotations), Some(" [GET /debug -> 200 70ms]"))
+    assertEquals(LoggerConfig.requestSummary(Map.empty), None)
 
   test("loads packaged assets and returns not found for a missing asset"):
     val index   = run(Main.asset("index.html", MediaType.text.html))
@@ -46,7 +46,7 @@ class MainSuite extends munit.FunSuite:
     assertEquals(missing.status, Status.NotFound)
 
   test("serves a static asset through the application routes"):
-    val routes   = run(Main.routes)
+    val routes   = run(ZIO.succeed(Main.staticRoutes))
     val request  = Request.get(URL.decode("/style.css").toOption.get)
     val response = run(zio.ZIO.scoped(routes.runZIO(request)))
     val content  = run(response.body.asString)

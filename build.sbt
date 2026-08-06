@@ -1,6 +1,10 @@
 import Dependencies._
 import org.scalajs.linker.interface.ModuleKind
 
+// TEMPLATE SETTING: point this at the Google OAuth "Web application" JSON downloaded from Google Cloud.
+// The file must contain web.client_id and web.client_secret. Keep it outside this repository.
+val oauthConfigFile = file("C:/Users/razva/OneDrive/code/@secrets/webapptemplate/oauth.config.json")
+
 lazy val deploymentArtifact = taskKey[File]("Build a self-contained backend deployment ZIP")
 
 addCommandAlias("artifact", "deploymentArtifact")
@@ -35,13 +39,30 @@ lazy val frontendAssets = Def.task {
   }
 }
 
+// Parses a `KEY=value` env file (as used by runApp/runApp.bat) so the same file can seed `sbt run`'s forked
+// process, keeping deployment identity out of the source and out of manual local setup alike.
+def parseEnvFile(file: File): Map[String, String] =
+  if (!file.isFile) Map.empty
+  else
+    IO.readLines(file)
+      .map(_.trim)
+      .filter(line => line.nonEmpty && !line.startsWith("#"))
+      .flatMap { line =>
+        line.split("=", 2) match {
+          case Array(key, value) => Some(key.trim -> value.trim)
+          case _                 => None
+        }
+      }
+      .toMap
+
 lazy val backend = (project in file("backend"))
   .settings(
     name := "webapptemplate-backend",
-    libraryDependencies ++= Seq(classGraph, zioHttp, zioLogging, munit % Test),
+    libraryDependencies ++= Seq(classGraph, zioHttp, zioLogging, firestore, firestoreAdmin, googleApiClient, munit % Test),
     Compile / resourceGenerators += frontendAssets.taskValue,
     run / fork         := true,
-    run / connectInput := true
+    run / connectInput := true,
+    run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "prod.env") ++ OAuthBuild.configEnv(oauthConfigFile)
   )
 
 lazy val root = (project in file("."))
@@ -74,11 +95,18 @@ lazy val root = (project in file("."))
 
         runtimeJars.foreach(jar => IO.copyFile(jar, stagingDir / "lib" / jar.getName))
 
-        Seq("runApp", "runApp.bat", "prod.env").foreach { fileName =>
+        Seq("runApp", "runApp.bat").foreach { fileName =>
           val source = resources / fileName
           if (!source.isFile) sys.error(s"Missing packaging resource: ${source.getAbsolutePath}")
           IO.copyFile(source, stagingDir / fileName)
         }
+
+        val sourceEnv = resources / "prod.env"
+        if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
+        IO.writeLines(
+          stagingDir / "prod.env",
+          IO.readLines(sourceEnv) ++ OAuthBuild.envLines(OAuthBuild.configEnv(oauthConfigFile))
+        )
 
         IO.delete(artifactZip)
         IO.zip(Path.allSubpaths(stagingDir).toSeq, artifactZip, None)

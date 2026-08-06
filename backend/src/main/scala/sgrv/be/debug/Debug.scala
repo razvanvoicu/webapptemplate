@@ -5,15 +5,19 @@ import java.lang.management.ManagementFactory
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.TimeUnit
+import sgrv.be.BackendEnvironment
 import sgrv.be.core.{Method, Route}
 import scala.jdk.CollectionConverters.*
 import zio.{IO, Task, UIO, ZIO}
 import zio.http.{Header, Request, Response}
 
 @Route(methods = Array(Method.GET), path = "/debug")
-object Debug extends (Request => UIO[Response]):
+object Debug extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
 
-  override def apply(_request: Request): UIO[Response] =
+  override def apply(_request: Request): ZIO[BackendEnvironment, Nothing, Response] =
+    response
+
+  private[debug] def response: UIO[Response] =
     collect(Seq.empty).map: signature =>
       Response.text(signature).addHeader(Header.CacheControl.NoStore)
 

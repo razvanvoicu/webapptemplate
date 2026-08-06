@@ -1,7 +1,7 @@
 package sgrv.be.debug
 
 import zio.{Runtime, UIO, Unsafe}
-import zio.http.{Request, Status, URL}
+import zio.http.Status
 
 class DebugSuite extends munit.FunSuite:
 
@@ -31,8 +31,7 @@ class DebugSuite extends munit.FunSuite:
     assert(signature.contains(s"Java version: ${java.lang.System.getProperty("java.version")}"))
 
   test("serves the signature response"):
-    val request  = Request.get(URL.decode("/debug").toOption.get)
-    val response = run(Debug(request))
+    val response = run(Debug.response)
     val content  = run(response.body.asString.orDie)
 
     assertEquals(response.status, Status.Ok)
