@@ -17,7 +17,19 @@
       "WebFetch(domain:docs.cloud.google.com)",
       "WebSearch",
       "WebFetch(domain:mvnrepository.com)",
-      "WebFetch(domain:search.maven.org)"
+      "WebFetch(domain:search.maven.org)",
+      "Read(//Users/raz/Library/CloudStorage/**)",
+      "Read(//Users/raz/**)",
+      "Bash(timeout 10 ls \"/Users/raz/Library/CloudStorage/OneDrive-Personal/code/@secrets/webapptemplate\")",
+      "Bash(echo \"exit:$?\")",
+      "Bash(cat /tmp/sbt_check.log)",
+      "Bash(lsof -tiTCP:8888 -sTCP:LISTEN)",
+      "Bash(xargs kill -9)",
+      "Bash(cs which *)",
+      "Bash(/opt/homebrew/bin/cs java-home *)",
+      "Bash(pkill -f \"find ~/Library.*coursier\")",
+      "Bash(kill 46812)",
+      "Bash(python3 -)"
     ]
   }
 }

@@ -11,15 +11,16 @@ import scala.jdk.CollectionConverters.*
 import zio.{IO, Task, UIO, ZIO}
 import zio.http.{Header, Request, Response}
 
-@Route(methods = Array(Method.GET), path = "/debug")
+// Declared `auth = false, adminPwd = true`: reachable without a Google session, but only with the correct
+// `?pwd=` admin password, since it exposes sensitive diagnostic data including environment-variable values.
+@Route(methods = Array(Method.GET), path = "/debug", auth = true, adminPwd = true)
 object Debug extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
 
   override def apply(_request: Request): ZIO[BackendEnvironment, Nothing, Response] =
     response
 
   private[debug] def response: UIO[Response] =
-    collect(Seq.empty).map: signature =>
-      Response.text(signature).addHeader(Header.CacheControl.NoStore)
+    collect(Seq.empty).map ( signature => Response.text(signature).addHeader(Header.CacheControl.NoStore) )
 
   private final case class NginxProcess(
       pid: Long,

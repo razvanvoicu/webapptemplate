@@ -12,24 +12,25 @@ import scala.util.{Failure, Success, Try}
 
 object Main:
 
-  private enum DebugState:
-    case Pending
-    case Loaded(text: String)
-    case Failed(message: String)
-
   private enum UserState:
     case Unknown
     case Unauthenticated
     case SignedIn(email: String, displayName: String)
     case AuthenticationFailed(message: String)
 
-  import DebugState.*
+  private enum SheetState:
+    case Idle
+    case Loading
+    case Loaded(rows: Seq[Seq[String]])
+    case Failed(message: String)
+
   import UserState.*
+  import SheetState.*
 
   def main(args: Array[String]): Unit =
-    val user      = Var[UserState](Unknown)
-    val debug     = Var[DebugState](Pending)
-    val debugOpen = Var(false)
+    val user         = Var[UserState](Unknown)
+    val sheetName    = Var("")
+    val sheetState   = Var[SheetState](Idle)
 
     dom
       .fetch("/me")
@@ -43,15 +44,17 @@ object Main:
         case Failure(error) => user.set(AuthenticationFailed(error.getMessage))
       }
 
-    def fetchDebug(): Unit = // Asynchronously load the system signature; useful when deploying in the cloud as serverless, to understand the running configuration
-      debug.set(Pending)
-      dom
-        .fetch("/debug")
-        .flatMap(_.text())
-        .onComplete {
-          case Success(text) => debug.set(Loaded(text))
-          case Failure(err)  => debug.set(Failed(err.getMessage))
-        }
+    def upsertAndFetch(): Unit =
+      val name = sheetName.now().trim
+      if name.isEmpty then sheetState.set(Failed("Enter a spreadsheet name first."))
+      else
+        sheetState.set(Loading)
+        postJson("/sheets/upsert", js.Dynamic.literal(name = name))
+          .flatMap(_ => fetchContent(name))
+          .onComplete {
+            case Success(rows)  => sheetState.set(Loaded(rows))
+            case Failure(error) => sheetState.set(Failed(error.getMessage))
+          }
 
     val app =
       div(
@@ -65,34 +68,37 @@ object Main:
             case AuthenticationFailed(message) => p(cls := "error", s"Authentication failed: $message")  // Error message if authentication fails
           }
         ),
-        button( // show backend's underlying system signature; useful when deploying in the cloud as serverless, to understand the running configuration
-          cls := "bug-button", // TODO: protect this button with further authentication
-          typ := "button",
-          title := "System signature",
-          aria.label := "Show the system signature",
-          "🐞",
-          onClick --> { _ =>
-            fetchDebug()
-            debugOpen.set(true)
-          }
-        ),
-        child <-- debugOpen.signal.map { // Display the system signature in a popup
-          case false => emptyNode
-          case true =>
+        child <-- user.signal.map {
+          case SignedIn(_, _) =>
             div(
-              cls := "overlay",
-              onClick --> { _ => debugOpen.set(false) },
               div(
-                cls := "popup",
-                onClick.stopPropagation --> { _ => () },
-                h1("System signature"),
-                child <-- debug.signal.map {
-                  case Pending        => p("Loading…")
-                  case Loaded(text)   => pre(cls := "debug-box", text)
-                  case Failed(reason) => p(cls := "error", s"Could not reach /debug: $reason")
-                }
-              )
+                cls := "sheet-row",
+                span("Input the name of a sample spreadsheet:"),
+                input(
+                  typ := "text",
+                  placeholder := "Sample spreadsheet",
+                  onInput.mapToValue --> sheetName
+                ),
+                button(
+                  typ := "button",
+                  "Create or update spreadsheet",
+                  onClick --> { _ => upsertAndFetch() }
+                )
+              ),
+              child <-- sheetState.signal.map {
+                case Idle           => emptyNode
+                case Loading        => p("Working…")
+                case Failed(reason) => p(cls := "error", reason)
+                case Loaded(rows) if rows.isEmpty => p("No rows yet.")
+                case Loaded(rows) =>
+                  table(
+                    cls := "sheet-table",
+                    thead(tr(th("Timestamp"), th("User agent"))),
+                    tbody(rows.map(row => tr(row.map(cell => td(cell)))))
+                  )
+              }
             )
+          case _ => emptyNode
         }
       )
 
@@ -108,3 +114,23 @@ object Main:
           .map(address => SignedIn(address, name.getOrElse(address)))
           .getOrElse(AuthenticationFailed("The backend returned no email address."))
     )
+
+  private def postJson(url: String, body: js.Dynamic): Future[Unit] =
+    val init = js.Dynamic.literal(
+      method = "POST",
+      headers = js.Dynamic.literal("Content-Type" -> "application/json"),
+      body = js.JSON.stringify(body)
+    )
+    dom.fetch(url, init.asInstanceOf[dom.RequestInit]).flatMap { response =>
+      if response.ok then Future.successful(())
+      else response.text().flatMap(text => Future.failed(new RuntimeException(s"${response.status}: $text")))
+    }
+
+  private def fetchContent(name: String): Future[Seq[Seq[String]]] =
+    dom.fetch(s"/sheets/content?name=${js.URIUtils.encodeURIComponent(name)}").flatMap { response =>
+      if response.ok then response.text().map(parseRows)
+      else response.text().flatMap(text => Future.failed(new RuntimeException(s"${response.status}: $text")))
+    }
+
+  private def parseRows(json: String): Seq[Seq[String]] =
+    js.JSON.parse(json).selectDynamic("rows").asInstanceOf[js.Array[js.Array[String]]].toSeq.map(_.toSeq)

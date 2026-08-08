@@ -33,6 +33,19 @@ class AuthSuite extends munit.FunSuite:
     assert(url.contains("state=state%2Fvalue"))
     assert(url.contains("access_type=offline"))
 
+  test("appends configured Google service scopes to the authorization URL"):
+    val url = GoogleOAuth.authorizationUrl(
+      "client-1",
+      "http://localhost:8888/auth/callback",
+      "state",
+      extraScopes = Seq("https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file")
+    )
+
+    assert(url.contains(
+      "scope=openid+email+profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fspreadsheets" +
+        "+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file"
+    ))
+
   test("loads and trims the environment-supplied OAuth configuration"):
     val configuration = AppConfig.fromEnvironment(Map(
       "GOOGLE_OAUTH_CLIENT_ID" -> " client-id ",
@@ -45,6 +58,14 @@ class AuthSuite extends munit.FunSuite:
     assertEquals(
       configuration,
       Right(AppConfig(OAuthConfig("client-id", "client-secret"), FirestoreConfig("project-id", "database-id", "location")))
+    )
+
+  test("parses GOOGLE_SERVICES as a trimmed, comma-separated scope list"):
+    assertEquals(AppConfig.googleServices(Map.empty), Seq.empty)
+    assertEquals(AppConfig.googleServices(Map("GOOGLE_SERVICES" -> "")), Seq.empty)
+    assertEquals(
+      AppConfig.googleServices(Map("GOOGLE_SERVICES" -> " scope-a , scope-b ,,scope-c")),
+      Seq("scope-a", "scope-b", "scope-c")
     )
 
   test("rejects an incomplete OAuth configuration"):

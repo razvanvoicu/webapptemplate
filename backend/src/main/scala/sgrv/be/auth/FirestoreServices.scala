@@ -110,12 +110,13 @@ private[be] object SessionStore:
         case Some(key) =>
           GoogleFuture.fromApiFuture(firestore.collection(accessCollection).document(key).get()).map: snapshot =>
             Option.when(snapshot.exists)(snapshot).flatMap: session =>
-              val storedKey = normalized(session.getString("sessionKey"))
-              val expiresAt = Option(session.getTimestamp("expiresAt")).map(_.toDate.toInstant)
-              val email     = normalized(session.getString("email"))
-              val name      = normalized(session.getString("name"))
+              val storedKey    = normalized(session.getString("sessionKey"))
+              val expiresAt    = Option(session.getTimestamp("expiresAt")).map(_.toDate.toInstant)
+              val email        = normalized(session.getString("email"))
+              val name         = normalized(session.getString("name"))
+              val refreshToken = normalized(session.getString("refreshToken"))
               if storedKey.contains(key) && expiresAt.exists(now.isBefore) then
-                email.map(address => SessionUser(address, name.getOrElse(address)))
+                email.map(address => SessionUser(address, name.getOrElse(address), refreshToken))
               else None
 
   private def normalized(value: String): Option[String] =

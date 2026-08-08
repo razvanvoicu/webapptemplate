@@ -4,7 +4,11 @@ import zio.{System, Task, ZIO, ZLayer}
 
 private[be] final case class OAuthConfig(clientId: String, clientSecret: String)
 private[auth] final case class FirestoreConfig(projectId: String, databaseId: String, location: String)
-private[be] final case class AppConfig(oauth: OAuthConfig, firestore: FirestoreConfig)
+private[be] final case class AppConfig(
+    oauth: OAuthConfig,
+    firestore: FirestoreConfig,
+    googleServices: Seq[String] = Seq.empty
+)
 
 private[be] object AppConfig:
   def load: Task[AppConfig] =
@@ -23,5 +27,13 @@ private[be] object AppConfig:
       projectId    <- required("GCP_PROJECT_ID")
       databaseId   <- required("FIRESTORE_DATABASE_ID")
       location     <- required("FIRESTORE_LOCATION")
-    yield AppConfig(OAuthConfig(clientId, clientSecret), FirestoreConfig(projectId, databaseId, location))
+    yield AppConfig(
+      OAuthConfig(clientId, clientSecret),
+      FirestoreConfig(projectId, databaseId, location),
+      googleServices(environment)
+    )
+
+  /** GOOGLE_SERVICES is optional: missing or empty requests no additional Google API entitlements during login. */
+  private[auth] def googleServices(environment: Map[String, String]): Seq[String] =
+    environment.getOrElse("GOOGLE_SERVICES", "").split(",").map(_.trim).filter(_.nonEmpty).toSeq
 

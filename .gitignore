@@ -1,4 +1,9 @@
 /.bsp/
 target/
 /.idea
-/.venv
+.venv
+.bloop/
+.lsp4ij/
+.metals/
+/project/project/
+*.iml

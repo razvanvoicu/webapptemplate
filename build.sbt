@@ -1,9 +1,21 @@
 import Dependencies._
 import org.scalajs.linker.interface.ModuleKind
 
-// TEMPLATE SETTING: point this at the Google OAuth "Web application" JSON downloaded from Google Cloud.
-// The file must contain web.client_id and web.client_secret. Keep it outside this repository.
-val oauthConfigFile = file("C:/Users/razva/OneDrive/code/@secrets/webapptemplate/oauth.config.json")
+// TEMPLATE SETTING: the OneDrive-synced folder holding this deployment's secrets, outside the repository. Its
+// path is OS-dependent because OneDrive mounts under a different root on each platform.
+val secretsDir = file(
+  if (sys.props("os.name").toLowerCase.contains("mac"))
+    "/Users/raz/Library/CloudStorage/OneDrive-Personal/code/@secrets/webapptemplate"
+  else
+    "C:/Users/razva/OneDrive/code/@secrets/webapptemplate"
+)
+
+// The Google OAuth "Web application" JSON downloaded from Google Cloud; must contain web.client_id and
+// web.client_secret.
+val oauthConfigFile = secretsDir / "oauth.config.json"
+
+// A single-line plain-text password gating routes declared `@Route(adminPwd = true)`, e.g. /debug.
+val adminPasswordFile = secretsDir / "admin.pwd"
 
 lazy val deploymentArtifact = taskKey[File]("Build a self-contained backend deployment ZIP")
 
@@ -58,11 +70,17 @@ def parseEnvFile(file: File): Map[String, String] =
 lazy val backend = (project in file("backend"))
   .settings(
     name := "webapptemplate-backend",
-    libraryDependencies ++= Seq(classGraph, zioHttp, zioLogging, firestore, firestoreAdmin, googleApiClient, munit % Test),
+    libraryDependencies ++= Seq(
+      classGraph, zioHttp, zioLogging, firestore, firestoreAdmin, googleApiClient, gson, munit % Test
+    ),
     Compile / resourceGenerators += frontendAssets.taskValue,
     run / fork         := true,
     run / connectInput := true,
-    run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "prod.env") ++ OAuthBuild.configEnv(oauthConfigFile)
+    // Some networks hand out AAAA (IPv6) records for googleapis.com without actually routing IPv6, which makes
+    // outbound Sheets/Drive calls fail with NoRouteToHostException; prefer IPv4 to avoid that.
+    run / javaOptions += "-Djava.net.preferIPv4Stack=true",
+    run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "prod.env") ++
+      OAuthBuild.configEnv(oauthConfigFile) ++ AdminBuild.configEnv(adminPasswordFile)
   )
 
 lazy val root = (project in file("."))
@@ -103,9 +121,10 @@ lazy val root = (project in file("."))
 
         val sourceEnv = resources / "prod.env"
         if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
+        val secretEnv = OAuthBuild.configEnv(oauthConfigFile) ++ AdminBuild.configEnv(adminPasswordFile)
         IO.writeLines(
           stagingDir / "prod.env",
-          IO.readLines(sourceEnv) ++ OAuthBuild.envLines(OAuthBuild.configEnv(oauthConfigFile))
+          IO.readLines(sourceEnv) ++ OAuthBuild.envLines(secretEnv)
         )
 
         IO.delete(artifactZip)

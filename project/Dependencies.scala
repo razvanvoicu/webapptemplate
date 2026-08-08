@@ -10,6 +10,9 @@ object Dependencies {
   lazy val firestore       = "com.google.cloud"      % "google-cloud-firestore"       % "3.43.0"
   lazy val firestoreAdmin  = "com.google.cloud"      % "google-cloud-firestore-admin" % "3.43.0"
   lazy val googleApiClient = "com.google.api-client" % "google-api-client"            % "2.8.0"
+  // JSON for the Sheets/Drive REST calls; already on the classpath transitively via google-api-client's
+  // GsonFactory, declared explicitly so the dependency doesn't rely on that transitive detail.
+  lazy val gson            = "com.google.code.gson"  % "gson"                         % "2.10.1"
 
   // Scala.js artifacts are declared with `%%%` in build.sbt, which needs a
   // settings scope, so only their versions live here.

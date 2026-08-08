@@ -2,6 +2,7 @@ package sgrv.be
 
 import sgrv.be.auth.{AppConfig, DatabaseAdmin, GoogleOAuth, SessionStore, TokenGenerator}
 import sgrv.be.core.RouteDiscovery
+import sgrv.be.sheets.SheetsClient
 import zio.*
 import zio.http.*
 import zio.logging.*
@@ -71,7 +72,15 @@ object Main extends ZIOAppDefault:
 
   private type Layer = BackendEnvironment & DatabaseAdmin
   private val backendLayer: ZLayer[Any, Throwable, Layer] =
-    ZLayer.make[Layer](AppConfig.live, GoogleOAuth.live, SessionStore.live, TokenGenerator.live, DatabaseAdmin.live)
+    ZLayer.make[Layer](
+      AppConfig.live,
+      GoogleOAuth.live,
+      SessionStore.live,
+      TokenGenerator.live,
+      DatabaseAdmin.live,
+      SheetsClient.live,
+      Client.default
+    )
 
   def run: ZIO[ZIOAppArgs, Any, Any] =
     val unit = for

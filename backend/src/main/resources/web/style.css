@@ -31,7 +31,7 @@ body {
 }
 
 .app {
-  width: min(46rem, 90vw);
+  width: 90vw;
 }
 
 .app h1 {
@@ -65,66 +65,65 @@ body {
   border-color: var(--fg);
 }
 
-.bug-button {
-  position: fixed;
-  right: 1rem;
-  bottom: 1rem;
-  width: 3rem;
-  height: 3rem;
-  font-size: 1.4rem;
-  line-height: 1;
+.error {
+  color: #c0392b;
+}
+
+.sheet-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+  font-size: 0.9rem;
+  overflow-x: auto;
+}
+
+.sheet-row span {
+  white-space: nowrap;
+}
+
+.sheet-row input {
+  min-width: 4rem;
+  padding: 0.4rem 0.6rem;
   background: var(--panel-bg);
   border: 1px solid var(--border);
-  border-radius: 50%;
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+}
+
+.sheet-row button {
+  white-space: nowrap;
+  padding: 0.45rem 0.9rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
   cursor: pointer;
 }
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.45);
-  z-index: 10;
+.sheet-row button:hover {
+  border-color: var(--fg);
 }
 
-.popup {
-  box-sizing: border-box;
-  width: min(46rem, 92vw);
-  max-height: 85vh;
-  overflow: auto;
-  padding: 1rem 1.5rem 1.5rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-
-.popup h1 {
-  font-size: 1.1rem;
-  font-weight: 600;
-  margin: 0 0 0.75rem;
-}
-
-.debug-box {
-  box-sizing: border-box;
+.sheet-table {
   width: 100%;
-  height: 60vh;
-  min-height: 8rem;
-  max-height: 70vh;
-  overflow: auto;
-  resize: both;
-  margin: 0;
-  padding: 1rem;
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  white-space: pre;
+  margin-top: 1rem;
+  border-collapse: collapse;
 }
 
-.error {
-  color: #c0392b;
+.sheet-table th,
+.sheet-table td {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.sheet-table th {
+  background: var(--panel-bg);
+  font-weight: 600;
 }

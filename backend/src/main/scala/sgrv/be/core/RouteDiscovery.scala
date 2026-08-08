@@ -2,6 +2,7 @@ package sgrv.be.core
 
 import io.github.classgraph.ClassGraph
 import sgrv.be.BackendEnvironment
+import sgrv.be.auth.{AdminAuth, SessionAuth}
 import scala.jdk.CollectionConverters.*
 import zio.{Task, ZIO}
 import zio.http.{Method as ZioMethod, Request, Response, RoutePattern, Routes, handler}
@@ -9,6 +10,8 @@ import zio.http.{Method as ZioMethod, Request, Response, RoutePattern, Routes, h
 private[be] final case class DiscoveredRoute(
     methods: Seq[ZioMethod],
     path: String,
+    auth: Boolean,
+    adminPwd: Boolean,
     handler: Request => ZIO[BackendEnvironment, Nothing, Response]
 )
 
@@ -52,14 +55,33 @@ private[be] object RouteDiscovery:
     DiscoveredRoute(
       annotation.methods.toSeq.map(method => ZioMethod.fromString(method.name)),
       annotation.path,
+      annotation.auth,
+      annotation.adminPwd,
       routeFunction
     )
+
+  /** Wraps a route's handler with the checks its `@Route(auth = ..., adminPwd = ...)` declares, so a rejecting
+    * check short-circuits before the handler ever runs. The two checks are independent: a route can require a
+    * session, a `?pwd=` admin password, both, or neither.
+    */
+  private def gated(route: DiscoveredRoute): Request => ZIO[BackendEnvironment, Nothing, Response] =
+    if !route.auth && !route.adminPwd then route.handler
+    else
+      request =>
+        val sessionCheck = if route.auth then SessionAuth.reject(request) else ZIO.succeed(None)
+        val adminCheck   = if route.adminPwd then AdminAuth.reject(request) else ZIO.succeed(None)
+        sessionCheck
+          .flatMap:
+            case some @ Some(_) => ZIO.succeed(some)
+            case None           => adminCheck
+          .flatMap(_.fold(route.handler(request))(ZIO.succeed))
 
   private[be] def fromDiscovered(discovered: Seq[DiscoveredRoute]): Routes[BackendEnvironment, Nothing] =
     Routes.fromIterable:
       discovered.flatMap: route =>
+        val handlerFunction = gated(route)
         route.methods.map: method =>
-          RoutePattern(method, route.path) -> handler((request: Request) => route.handler(request))
+          RoutePattern(method, route.path) -> handler((request: Request) => handlerFunction(request))
 
   def routes: Task[Routes[BackendEnvironment, Nothing]] =
     discover().map(fromDiscovered)

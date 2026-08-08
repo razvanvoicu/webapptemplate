@@ -8,4 +8,4 @@ set -a
 . "$APP_HOME/prod.env"
 set +a
 
-exec java -cp "$APP_HOME/app.jar:$APP_HOME/lib/*" sgrv.be.Main "$@"
+exec java -Djava.net.preferIPv4Stack=true -cp "$APP_HOME/app.jar:$APP_HOME/lib/*" sgrv.be.Main "$@"

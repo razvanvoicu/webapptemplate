@@ -11,4 +11,19 @@ import java.lang.annotation.Target;
 public @interface Route {
     Method[] methods();
     String path();
+
+    /**
+     * When {@code true} (the default), route discovery rejects a request with no valid browser session before the
+     * route's handler runs, so the handler need not check authentication itself. Set to {@code false} for routes
+     * that must remain reachable without a session, such as the login flow itself.
+     */
+    boolean auth() default true;
+
+    /**
+     * When {@code true} (default {@code false}), route discovery additionally requires a {@code ?pwd=} query
+     * parameter matching the {@code ADMIN_PASSWORD} environment variable, an alternative to a Google session for
+     * reaching a diagnostic or admin route directly by URL. Independent of {@code auth}: combine with
+     * {@code auth = false} to make a route reachable by password alone.
+     */
+    boolean adminPwd() default false;
 }

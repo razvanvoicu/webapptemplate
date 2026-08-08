@@ -5,8 +5,10 @@ import sgrv.be.BackendEnvironment
 import zio.{durationInt, ZIO}
 import zio.http.{Cookie, Path, Request, Response, Status, URL}
 
-/** Starts the Google OAuth 2.0 authorization-code flow with a CSRF-protecting `state` cookie. */
-@Route(methods = Array(Method.GET), path = "/auth/login")
+/** Starts the Google OAuth 2.0 authorization-code flow with a CSRF-protecting `state` cookie. Declared `auth =
+  * false` because it is how a signed-out visitor obtains a session in the first place.
+  */
+@Route(methods = Array(Method.GET), path = "/auth/login", auth = false)
 object Login extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
 
   private[auth] val stateCookieName = "auth_state"
@@ -27,7 +29,14 @@ object Login extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
     redirect.catchAll: error =>
       ZIO.logWarning(s"Google login could not start: ${error.getMessage}") *>
         ZIO.succeed(Response.text("Login is currently unavailable.").status(Status.ServiceUnavailable))
-
+  /**
+    * Generate the cookie that links the Google Auth login call to the ensuing callback. Upon receiving
+    * this cookie the backend can be sure that it responds to a login attempt from the same session.
+    *
+    * @param state Generated random key to be verified by the callback
+    * @param secure Usually 'true'
+    * @return
+    */
   private def stateCookie(state: String, secure: Boolean): Cookie.Response =
     Cookie.Response(
       name = stateCookieName,
