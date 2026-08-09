@@ -10,10 +10,10 @@ class MainSuite extends munit.FunSuite:
       Runtime.default.unsafe.run(effect).getOrThrowFiberFailure()
     }
 
-  test("binds the HTTP server to IPv4 loopback"):
-    val address = Main.serverConfig(9000).address
+  test("binds the HTTP server to a given host and port"):
+    val address = Main.serverConfig("0.0.0.0", 9000).address
 
-    assertEquals(address.getAddress.getHostAddress, "127.0.0.1")
+    assertEquals(address.getAddress.getHostAddress, "0.0.0.0")
     assertEquals(address.getPort, 9000)
 
   test("selects the port from arguments, environment, or the default"):
@@ -21,6 +21,11 @@ class MainSuite extends munit.FunSuite:
     assertEquals(Main.port(Chunk.empty, Some("7000")), 7000)
     assertEquals(Main.port(Chunk("invalid"), Some("7000")), 8888)
     assertEquals(Main.port(Chunk.empty, None), 8888)
+
+  test("selects the bind address from the environment, defaulting to IPv4 loopback"):
+    assertEquals(Main.bindAddress(Some("0.0.0.0")), "0.0.0.0")
+    assertEquals(Main.bindAddress(Some("  ")), "127.0.0.1")
+    assertEquals(Main.bindAddress(None), "127.0.0.1")
 
   test("formats request annotations as a compact route summary"):
     val annotations = Map(

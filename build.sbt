@@ -17,7 +17,22 @@ val oauthConfigFile = secretsDir / "oauth.config.json"
 // A single-line plain-text password gating routes declared `@Route(adminPwd = true)`, e.g. /debug.
 val adminPasswordFile = secretsDir / "admin.pwd"
 
-lazy val deploymentArtifact = taskKey[File]("Build a self-contained backend deployment ZIP")
+// gcloud's own well-known Application Default Credentials location, baked into the Docker image (only) so
+// `docker run` can reach Firestore/Sheets outside a GCP platform's own workload identity. Generate it with
+// `gcloud auth application-default login`. Optional: if missing, the Docker image is still built, but the
+// container will need credentials supplied another way (e.g. running on Cloud Run/GKE/GCE, or a mounted file).
+val adcFile = file(
+  if (sys.props("os.name").toLowerCase.contains("win"))
+    s"${sys.env.getOrElse("APPDATA", "")}/gcloud/application_default_credentials.json"
+  else
+    s"${sys.props("user.home")}/.config/gcloud/application_default_credentials.json"
+)
+
+// TEMPLATE SETTING: the target platform for the Docker image, independent of the machine running `sbt artifact`
+// (e.g. building on Apple Silicon for an amd64 deployment host). BuildKit cross-builds via emulation as needed.
+val dockerPlatform = "linux/amd64"
+
+lazy val deploymentArtifact = taskKey[Unit]("Build the backend's Docker image")
 
 addCommandAlias("artifact", "deploymentArtifact")
 
@@ -51,8 +66,8 @@ lazy val frontendAssets = Def.task {
   }
 }
 
-// Parses a `KEY=value` env file (as used by runApp/runApp.bat) so the same file can seed `sbt run`'s forked
-// process, keeping deployment identity out of the source and out of manual local setup alike.
+// Parses a `KEY=value` env file in the format shared by prod.env, test.env, and the runApp launcher, so any such
+// file can seed `sbt run`'s forked process without deployment identity living in the source.
 def parseEnvFile(file: File): Map[String, String] =
   if (!file.isFile) Map.empty
   else
@@ -79,7 +94,7 @@ lazy val backend = (project in file("backend"))
     // Some networks hand out AAAA (IPv6) records for googleapis.com without actually routing IPv6, which makes
     // outbound Sheets/Drive calls fail with NoRouteToHostException; prefer IPv4 to avoid that.
     run / javaOptions += "-Djava.net.preferIPv4Stack=true",
-    run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "prod.env") ++
+    run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "test.env") ++
       OAuthBuild.configEnv(oauthConfigFile) ++ AdminBuild.configEnv(adminPasswordFile)
   )
 
@@ -94,16 +109,11 @@ lazy val root = (project in file("."))
     deploymentArtifact := Def.taskDyn {
       clean.value
       Def.task {
+        val log         = streams.value.log
         val appJar      = (backend / Compile / packageBin).value
         val runtimeJars = (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile)
         val resources   = (backend / Compile / resourceDirectory).value
         val outputDir   = (backend / Compile / target).value
-        val stagingDir  = outputDir / "artifact"
-        val artifactZip = outputDir / s"${name.value}-${version.value}.zip"
-
-        IO.delete(stagingDir)
-        IO.createDirectory(stagingDir / "lib")
-        IO.copyFile(appJar, stagingDir / "app.jar")
 
         val duplicateJarNames = runtimeJars.groupBy(_.getName).collect {
           case (jarName, jars) if jars.size > 1 => jarName
@@ -111,26 +121,51 @@ lazy val root = (project in file("."))
         if (duplicateJarNames.nonEmpty)
           sys.error(s"Runtime dependency filename collision: ${duplicateJarNames.mkString(", ")}")
 
-        runtimeJars.foreach(jar => IO.copyFile(jar, stagingDir / "lib" / jar.getName))
+        val secretEnv = OAuthBuild.configEnv(oauthConfigFile) ++ AdminBuild.configEnv(adminPasswordFile)
 
-        Seq("runApp", "runApp.bat").foreach { fileName =>
-          val source = resources / fileName
-          if (!source.isFile) sys.error(s"Missing packaging resource: ${source.getAbsolutePath}")
-          IO.copyFile(source, stagingDir / fileName)
-        }
+        // Stage the Docker build context: app.jar, lib/*.jar, a secret-bearing prod.env, runApp (the image's
+        // entrypoint), the Dockerfile itself, and (if available) local ADC for testing outside a GCP platform's
+        // own workload identity.
+        val dockerDir = outputDir / "docker"
+        IO.delete(dockerDir)
+        IO.createDirectory(dockerDir / "lib")
+        IO.copyFile(appJar, dockerDir / "app.jar")
+        runtimeJars.foreach(jar => IO.copyFile(jar, dockerDir / "lib" / jar.getName))
 
         val sourceEnv = resources / "prod.env"
         if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
-        val secretEnv = OAuthBuild.configEnv(oauthConfigFile) ++ AdminBuild.configEnv(adminPasswordFile)
-        IO.writeLines(
-          stagingDir / "prod.env",
-          IO.readLines(sourceEnv) ++ OAuthBuild.envLines(secretEnv)
-        )
+        val envLines = IO.readLines(sourceEnv) ++ OAuthBuild.envLines(secretEnv)
+        // Explicit "\n" rather than IO.writeLines (which joins with the platform line separator, i.e. "\r\n"
+        // when this task runs on Windows): prod.env is `.`-sourced by the POSIX runApp script regardless of
+        // which OS built it, and a CRLF-corrupted value there isn't caught by this app's own defensive
+        // trimming for every variable (PORT notably isn't trimmed before being parsed as an integer).
+        IO.write(dockerDir / "prod.env", envLines.map(_ + "\n").mkString)
 
-        IO.delete(artifactZip)
-        IO.zip(Path.allSubpaths(stagingDir).toSeq, artifactZip, None)
-        streams.value.log.success(s"Created deployment artifact: ${artifactZip.getAbsolutePath}")
-        artifactZip
+        Seq("runApp", "Dockerfile").foreach { fileName =>
+          val source = resources / fileName
+          if (!source.isFile) sys.error(s"Missing packaging resource: ${source.getAbsolutePath}")
+          IO.copyFile(source, dockerDir / fileName)
+        }
+
+        if (adcFile.isFile) IO.copyFile(adcFile, dockerDir / "application_default_credentials.json")
+        else
+          log.warn(
+            s"No Application Default Credentials found at ${adcFile.getAbsolutePath}; building the Docker image " +
+              "without them. Run `gcloud auth application-default login` first, or supply credentials to the " +
+              "container another way (e.g. GCP workload identity on Cloud Run/GKE/GCE)."
+          )
+
+        val imageTag = s"${name.value}:${version.value}"
+        val dockerBuildArgs = Seq(
+          "docker", "build",
+          "--platform", dockerPlatform,
+          "-t", imageTag,
+          "-t", s"${name.value}:latest",
+          "."
+        )
+        val exitCode = sys.process.Process(dockerBuildArgs, dockerDir).!
+        if (exitCode != 0) sys.error(s"docker build failed for $imageTag (exit code $exitCode)")
+        log.success(s"Built Docker image for $dockerPlatform: $imageTag (and ${name.value}:latest)")
       }
     }.value
   )

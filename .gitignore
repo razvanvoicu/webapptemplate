@@ -7,3 +7,5 @@ target/
 .metals/
 /project/project/
 *.iml
+/firebase-debug.log
+/firestore-debug.log

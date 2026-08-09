@@ -32,6 +32,7 @@ class AuthSuite extends munit.FunSuite:
     assert(url.contains("scope=openid+email+profile"))
     assert(url.contains("state=state%2Fvalue"))
     assert(url.contains("access_type=offline"))
+    assert(url.contains("prompt=select_account+consent"))
 
   test("appends configured Google service scopes to the authorization URL"):
     val url = GoogleOAuth.authorizationUrl(

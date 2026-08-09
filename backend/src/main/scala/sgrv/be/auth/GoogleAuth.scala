@@ -106,7 +106,9 @@ private[be] object GoogleOAuth:
       "response_type" -> "code",
       "scope"         -> (baseScopes ++ extraScopes).mkString(" "),
       "state"         -> state,
-      "prompt"        -> "select_account",
+      // "consent" forces Google to show the full consent screen (and reissue a refresh token) on every login,
+      // rather than silently reusing a prior grant that may predate scopes this app has since started requesting.
+      "prompt"        -> "select_account consent",
       "access_type"   -> "offline"
     ).map((name, value) => s"$name=${URLEncoder.encode(value, UTF_8)}")
       .mkString(s"$authorizationEndpoint?", "&", "")

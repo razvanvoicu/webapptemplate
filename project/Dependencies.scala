@@ -1,3 +1,4 @@
+//noinspection scala2InSource3
 import sbt._
 
 object Dependencies {

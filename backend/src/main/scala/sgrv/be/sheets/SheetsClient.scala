@@ -85,7 +85,7 @@ private[be] object SheetsClient:
         url   <- parseUrl(s"$sheetsBaseUrl/$spreadsheetId/values/$range")
         json  <- call(Method.GET, url, accessToken, body = None)
         values = Option(json.getAsJsonArray("values")).toSeq.flatMap(_.asScala)
-      yield values.map(_.getAsJsonArray.asScala.map(_.getAsString).toSeq).toSeq
+      yield values.map(_.getAsJsonArray.asScala.map(_.getAsString).toSeq)
 
     private def driveQuery(name: String): String =
       val escaped = name.replace("\\", "\\\\").replace("'", "\\'")

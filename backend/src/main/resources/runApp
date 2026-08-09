@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
+# shellcheck disable=SC1007
 APP_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 set -a

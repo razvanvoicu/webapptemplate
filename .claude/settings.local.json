@@ -29,7 +29,23 @@
       "Bash(/opt/homebrew/bin/cs java-home *)",
       "Bash(pkill -f \"find ~/Library.*coursier\")",
       "Bash(kill 46812)",
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(rm -f /tmp/sbt_envcheck.log)",
+      "Bash(gcloud components *)",
+      "Bash(docker --version)",
+      "Bash(docker info *)",
+      "Bash(timeout 60 docker pull eclipse-temurin:21-jre-jammy)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(docker pull *)",
+      "Bash(curl -sS -m 8 -o /dev/null -w \"HTTP %{http_code} in %{time_total}s\\\\n\" https://registry-1.docker.io/v2/)",
+      "Bash(docker run *)",
+      "Bash(curl -sS -m 5 -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8899/)",
+      "Bash(lsof -nP -iTCP:8888 -sTCP:LISTEN)",
+      "Bash(docker image *)",
+      "Bash(curl -sS -m 5 -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8898/)",
+      "Bash(curl -sS -m 5 -o /dev/null -w \"/me HTTP %{http_code}\\\\n\" http://localhost:8898/me)",
+      "Bash(docker rm *)",
+      "Bash(grep -n \"sbt artifact\\\\` \\(assumed already installed\\)\\\\|webapptemplate:<version>\\\\`\\\\`.*webapptemplate:latest\" README.rst)"
     ]
   }
 }

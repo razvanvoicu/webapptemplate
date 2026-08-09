@@ -77,7 +77,7 @@ On Windows, the development server can be stopped by port with:
    ./scripts/stopapp.ps1 -Port 8888
 
 ``sbt run`` sets ``-Djava.net.preferIPv4Stack=true`` on the forked JVM (``run / javaOptions`` in ``build.sbt``),
-and the packaged ``runApp``/``runApp.bat`` launchers pass the same flag directly. Some networks hand out an
+and the Docker image's ``runApp`` launcher passes the same flag directly. Some networks hand out an
 IPv6 (AAAA) address for ``googleapis.com`` without actually routing IPv6, which otherwise surfaces as
 ``io.netty.channel.AbstractChannel$AnnotatedNoRouteToHostException`` /
 ``java.net.NoRouteToHostException`` from outbound Google API calls (the OAuth token exchange, or the Sheets/Drive
@@ -160,15 +160,16 @@ Keep this file outside the repository. It must use Google's standard structure
 and contain ``web.client_id`` and ``web.client_secret``. For ``sbt run``, the
 build reads these fields and supplies them to the backend as environment
 variables. For ``sbt artifact``, it appends them only to the ``prod.env`` copy
-inside the staged deployment ZIP; the source ``prod.env`` remains secret-free.
-The ZIP therefore contains a client secret and must be stored and distributed
-as a secret-bearing deployment artifact. ``adminPasswordFile``, described in
-`Admin-protected routes`_, resolves from the same ``secretsDir``.
+staged into the Docker build context; the source ``prod.env`` remains
+secret-free. The resulting Docker image therefore contains a client secret and
+must be handled as a secret-bearing artifact (see `Packaging and deployment`_).
+``adminPasswordFile``, described in `Admin-protected routes`_, resolves from
+the same ``secretsDir``.
 
 The backend reads the OAuth client ID and secret directly from its environment;
 it does not copy them into Firestore. The external JSON is the local source of
-truth, while the generated ``prod.env`` copy is the source of truth inside a
-deployment ZIP.
+truth, while the generated ``prod.env`` copy is the source of truth inside the
+Docker image.
 
 Authentication uses the server-side OAuth 2.0 authorization-code flow.
 ``/auth/login`` redirects the browser to Google with a CSRF-protecting
@@ -201,16 +202,20 @@ no code changes are needed between environments:
   --impersonate-service-account=<GCP_PROJECT_ID's Firestore service account>``.
 * On Cloud Run, deploy the service with that same service account.
 
-The GCP project, the Firestore database ID, and its location live in
-``prod.env`` (``GCP_PROJECT_ID``, ``FIRESTORE_DATABASE_ID``,
-``FIRESTORE_LOCATION``) rather than in source, so a fork of this template
-only needs to edit that one file. ``sbt run`` sources ``prod.env`` into the
-forked process automatically, and the packaged ``runApp``/``runApp.bat``
-launchers do the same in a deployment, so nothing needs to be set by hand in
-either place. On startup the backend checks for the Firestore database named
-``FIRESTORE_DATABASE_ID`` and creates it in Native mode at
-``FIRESTORE_LOCATION`` if it does not exist. A failed initialization is logged
-as a warning so the HTTP server can still start, but database-backed login and
+The GCP project, the Firestore database ID, and its location live in an env file (``GCP_PROJECT_ID``,
+``FIRESTORE_DATABASE_ID``, ``FIRESTORE_LOCATION``) rather than in source, so a fork of this template only needs
+to edit that one file. Which file depends on how the backend is started, so local runs and deployments can point
+at different configuration (a test Firestore database and project, say, versus the real one) without editing
+source:
+
+* ``sbt run`` sources ``backend/src/main/resources/test.env`` into the forked local process automatically.
+* ``sbt artifact`` instead reads ``backend/src/main/resources/prod.env``, and both it and the OAuth/admin secrets
+  from `OAuth configuration file`_ / `Admin-protected routes`_ are baked into the ``prod.env`` staged into the
+  Docker build context; the image's ``runApp`` launcher sources that copy at startup.
+
+Either way nothing needs to be set by hand at run time. On startup the backend checks for the Firestore database
+named ``FIRESTORE_DATABASE_ID`` and creates it in Native mode at ``FIRESTORE_LOCATION`` if it does not exist. A
+failed initialization is logged as a warning so the HTTP server can still start, but database-backed login and
 session checks cannot succeed until Firestore is available.
 
 One-time setup:
@@ -242,6 +247,53 @@ The session cookie is HttpOnly, ``SameSite=Lax``, scoped to ``/``, and expires
 after seven days. It is marked Secure when the callback is served over HTTPS.
 The OAuth ``state`` cookie has the same browser protections and expires after
 ten minutes.
+
+Testing against a local Firestore emulator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``test.env`` sets ``FIRESTORE_EMULATOR_HOST=localhost:8880``, so ``sbt run`` talks to a local Firestore emulator
+instead of the real GCP project by default. The Firestore client library detects this environment variable
+itself and connects to that local, unauthenticated instance instead — skipping Application Default Credentials
+entirely, so the ``gcloud auth application-default login`` step above isn't needed for local runs. Remove or
+comment out the line in ``test.env`` to go back to hitting the real project locally.
+
+``firebase.json`` at the repository root configures the emulator's port (``8880``), enables its web UI
+(``4000``), and sets ``singleProjectMode: false``. ``.firebaserc`` alongside it pins the project id to
+``GCP_PROJECT_ID`` (``apps-416208`` by default). Start it with the Firebase CLI (``npm install -g firebase-tools``
+if you don't have it):
+
+.. code-block:: console
+
+   firebase emulators:start --only firestore --project=<GCP_PROJECT_ID>
+
+With it running, browse ``http://localhost:4000/firestore`` to inspect the ``Access`` collection live while
+exercising the login flow. Restarting the emulator wipes its data (it's in-memory only), so a fresh restart
+means signing in again before there's anything to see.
+
+Getting the Emulator UI to actually display data here took three separate fixes, each worth knowing about since
+the failure mode of each is "looks fine, shows nothing," with no error surfaced anywhere obvious:
+
+* ``DatabaseAdmin.live`` detects ``FIRESTORE_EMULATOR_HOST`` and points its ``FirestoreAdminClient`` at the
+  emulator too (plaintext channel, no credentials) instead of real GCP. Without this, ``ensureDatabase`` would
+  silently check/create the database against the real project instead — using whatever Application Default
+  Credentials happen to be configured — while the emulator's own copy of the database is never created, and the
+  real-GCP call "succeeds" from the app's point of view, so nothing gets logged.
+* ``singleProjectMode: false`` in ``firebase.json``: the Emulator UI defaults to "demo mode," which only
+  recognizes a single project.
+* ``.firebaserc``: without it, the UI's own browser-side code resolves its *own* project id independently of
+  both the app and any ``--project`` flag, falling back to a synthetic ``demo-no-project`` — so it queries a
+  project with nothing in it while the real data sits under ``GCP_PROJECT_ID``. This one is diagnosable by
+  opening the browser's network tab and checking which project id the ``listCollectionIds``/data requests to
+  ``localhost:8880`` actually use.
+
+Data can be genuinely present and readable — verifiable directly against the emulator's REST API, e.g. ``curl
+http://localhost:8880/v1/projects/<GCP_PROJECT_ID>/databases/webapptemplate/documents/Access`` — while the UI
+shows nothing, for any of the three reasons above.
+
+One further caveat worth checking if session storage doesn't work against the emulator: this app uses a *named*
+Firestore database (``FIRESTORE_DATABASE_ID=webapptemplate``, a newer real-Firestore feature), and older
+Firestore emulator versions only emulated the single default database. If session reads/writes fail against the
+emulator, try setting ``test.env``'s ``FIRESTORE_DATABASE_ID`` to ``(default)`` as a first troubleshooting step.
 
 Google service entitlements (Sheets)
 -------------------------------------
@@ -301,7 +353,7 @@ operator should reach without ever signing in — a health check, say — would 
 file`_) points at a plain-text file containing a single line with the admin password, kept outside the repository
 beside ``oauth.config.json``. For ``sbt run``, the build reads this file and supplies it to the backend as the
 ``ADMIN_PASSWORD`` environment variable. For ``sbt artifact``, it appends ``ADMIN_PASSWORD`` only to the
-``prod.env`` copy inside the staged deployment ZIP, alongside the OAuth client secret; the source ``prod.env``
+``prod.env`` staged into the Docker build context, alongside the OAuth client secret; the source ``prod.env``
 remains secret-free.
 
 The password travels as a URL query parameter, so treat it like any other bearer credential: it can end up in
@@ -387,39 +439,57 @@ The generated HTML report is
 Packaging and deployment
 ------------------------
 
-Build a deployment ZIP with:
+Build a Docker image with:
 
 .. code-block:: console
 
    sbt artifact
 
-This performs a clean build and creates
-``backend/target/webapptemplate-<version>.zip``. The archive contains the
-application JAR, all runtime dependency JARs, a generated ``prod.env`` containing
-the OAuth client configuration and the admin password, and launchers for
-Unix-like systems and Windows.
-The project currently produces this ZIP; Docker-image packaging is not yet part
-of the build.
+This performs a clean build, stages a Docker build context under ``backend/target/docker/`` (application JAR, all
+runtime dependency JARs, a generated ``prod.env`` with the OAuth client configuration and the admin password
+baked in, the ``runApp`` launcher, and the ``Dockerfile`` itself), and runs ``docker build`` there (assumed
+already installed). The result is tagged both ``webapptemplate:<version>`` and ``webapptemplate:latest``.
 
-After extracting the archive, start it on Linux or macOS with:
+``dockerPlatform`` near the top of ``build.sbt`` (default ``linux/amd64``) sets the image's target platform
+independently of the machine running the build — e.g. building on Apple Silicon for an amd64 deployment host.
+Docker/BuildKit cross-builds via emulation as needed, so nothing else has to change; it's slower than a native
+build (and a container started from a foreign-platform image runs under emulation too, noticeably slower to
+start than a native one) but produces a correct image either way.
+
+The image's ``ENTRYPOINT`` runs ``runApp`` (the same launcher used before this template moved to Docker-only
+packaging), which loads ``prod.env`` before starting ``sgrv.be.Main``.
+
+The HTTP server binds to ``BIND_ADDRESS`` (``127.0.0.1`` if unset) — a process bound only to loopback is
+unreachable from outside a container regardless of published ports, so the ``Dockerfile`` sets
+``BIND_ADDRESS=0.0.0.0`` itself. Run the image with:
 
 .. code-block:: console
 
-   sh runApp
+   docker run -p 8888:8888 webapptemplate:latest
 
-Or on Windows with:
+or, if a reverse proxy (e.g. nginx) on the same host will terminate HTTPS and forward to it, publish only to
+loopback so nothing else on the network can reach the container directly:
 
-.. code-block:: doscon
+.. code-block:: console
 
-   runApp.bat
+   docker run -p 127.0.0.1:8888:8888 webapptemplate:latest
 
-Both launchers load ``prod.env`` before starting ``sgrv.be.Main``. A compatible
-Java runtime must be installed on the deployment host.
+Application Default Credentials work differently depending on where the image runs. On Cloud Run/GKE/GCE,
+nothing needs to change: the platform's own workload identity (the attached service account) supplies ADC
+automatically, exactly as described in `Login with Google`_, and the Dockerfile's baked-in credentials (see
+below) are simply unused. Running the image *outside* a GCP platform — a plain ``docker run`` on any other host,
+including for local testing — needs credentials from somewhere, since there's no metadata server to ask;
+``sbt artifact`` bakes in whatever ADC file it finds at gcloud's own well-known location
+(``~/.config/gcloud/application_default_credentials.json`` on macOS/Linux, generated by
+``gcloud auth application-default login``) if present, warning and proceeding without it otherwise.
 
-The current HTTP server binds specifically to ``127.0.0.1``. That is convenient
-for local development and a same-host reverse proxy, but a container platform
-that expects the process to listen on ``0.0.0.0`` requires a corresponding
-server configuration change.
+This makes the Docker image itself a secret-bearing artifact, on top of the OAuth/admin secrets already baked
+into its copy of ``prod.env``. Do not push it to a public registry; transfer it directly with
+``docker save``/``docker load``, or push to a private registry you control. A production deployment on
+Cloud Run/GKE/GCE doesn't need the baked-in credential at all and is arguably better off without it (workload
+identity rotates automatically; a baked-in file doesn't); this mechanism exists for the case of testing the
+exact image you're about to deploy, or running it on a host with no workload identity to rely on, such as a
+plain Linux VM behind your own reverse proxy.
 
 Repository layout
 -----------------
@@ -427,6 +497,8 @@ Repository layout
 .. code-block:: text
 
    build.sbt
+   firebase.json
+   .firebaserc
    project/OAuthBuild.scala
    project/AdminBuild.scala
    project/Dependencies.scala
@@ -440,6 +512,8 @@ Repository layout
    backend/src/main/scala/sgrv/be/core/
    backend/src/main/scala/sgrv/be/debug/
    backend/src/main/resources/prod.env
+   backend/src/main/resources/test.env
+   backend/src/main/resources/Dockerfile
    backend/src/main/resources/web/
    backend/src/test/scala/
    scripts/stopapp.ps1
@@ -470,7 +544,9 @@ What absolutely needs changing
    another cloud-synced folder, or a plain local directory — the mechanism is just two ``File`` paths, not
    OneDrive-specific).
 
-4. **``backend/src/main/resources/prod.env``**:
+4. **``backend/src/main/resources/prod.env`` and ``test.env``** — the same three settings in both (see
+   `Login with Google`_ for how the two files are used differently by ``sbt run`` versus ``sbt artifact``; a
+   fork can safely point them at different GCP projects, e.g. a real one and a test one):
 
    * ``GCP_PROJECT_ID``, ``FIRESTORE_DATABASE_ID``, ``FIRESTORE_LOCATION`` — your new project and the Firestore
      database/location you want created there.
@@ -491,7 +567,7 @@ Worth changing, but not load-bearing
 
 * ``ThisBuild / organization`` / ``organizationName`` and the three ``name`` settings in ``build.sbt``
   (``webapptemplate``, ``webapptemplate-frontend``, ``webapptemplate-backend``) — cosmetic, but they name your
-  build artifacts and deployment ZIP.
+  build artifacts and Docker image tags (the root project's ``name`` specifically).
 * The ``<title>`` in ``backend/src/main/resources/web/index.html`` — currently "Web App Template".
 * The ``sgrv.be`` / ``sgrv.fe`` package names. Purely a naming choice, but if you rename them, also update
   ``RouteDiscovery.discover``'s ``.acceptPackages("sgrv.be")`` filter in

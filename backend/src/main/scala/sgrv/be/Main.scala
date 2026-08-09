@@ -9,7 +9,9 @@ import zio.logging.*
 
 private[be] object Config:
   val defaultPort = 8888
-  val bindAddress = "127.0.0.1"
+  // 127.0.0.1 suits a same-host reverse proxy or bare-VM deployment; a container needs 0.0.0.0 (see BIND_ADDRESS
+  // below), since a process bound only to loopback is unreachable from outside its own network namespace.
+  val defaultBindAddress = "127.0.0.1"
   val staticCacheCtrl = Header.CacheControl.MaxAge(300)
 
 private[be] object LoggerConfig:
@@ -68,7 +70,13 @@ object Main extends ZIOAppDefault:
   private[be] def port(args: Chunk[String], environmentPort: Option[String]): Int =
     args.headOption.orElse(environmentPort).flatMap(_.toIntOption).getOrElse(defaultPort)
 
-  private[be] def serverConfig(port: Int): Server.Config = Server.Config.default.binding(bindAddress, port)
+  private def bindAddress: UIO[String] =
+    System.env("BIND_ADDRESS").orElseSucceed(None).map(bindAddress)
+
+  private[be] def bindAddress(environmentValue: Option[String]): String =
+    environmentValue.map(_.trim).filter(_.nonEmpty).getOrElse(defaultBindAddress)
+
+  private[be] def serverConfig(host: String, port: Int): Server.Config = Server.Config.default.binding(host, port)
 
   private type Layer = BackendEnvironment & DatabaseAdmin
   private val backendLayer: ZLayer[Any, Throwable, Layer] =
@@ -82,16 +90,18 @@ object Main extends ZIOAppDefault:
       Client.default
     )
 
+  //noinspection HttpUrlsUsage
   def run: ZIO[ZIOAppArgs, Any, Any] =
     val unit = for
       args              <- getArgs
       p                 <- port(args)
+      host              <- bindAddress
       applicationRoutes <- routes.map(staticRoutes ++ _)
       _ <- DatabaseAdmin.ensureDatabase.catchAll: error =>
         ZIO.logWarning(s"Could not ensure the Firestore database: ${error.getMessage}")
-      _ <- ZIO.logInfo(s"Serving on http://$bindAddress:$p/")
+      _ <- ZIO.logInfo(s"Serving on http://$host:$p/")
       _ <- Server
         .serve(applicationRoutes @@ HandlerAspect.requestLogging())
-        .provideSome[BackendEnvironment](Server.defaultWith(_ => serverConfig(p)))
+        .provideSome[BackendEnvironment](Server.defaultWith(_ => serverConfig(host, p)))
     yield ()
     unit.provideSome[ZIOAppArgs](backendLayer)
