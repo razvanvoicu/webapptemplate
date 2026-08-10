@@ -45,7 +45,31 @@
       "Bash(curl -sS -m 5 -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8898/)",
       "Bash(curl -sS -m 5 -o /dev/null -w \"/me HTTP %{http_code}\\\\n\" http://localhost:8898/me)",
       "Bash(docker rm *)",
-      "Bash(grep -n \"sbt artifact\\\\` \\(assumed already installed\\)\\\\|webapptemplate:<version>\\\\`\\\\`.*webapptemplate:latest\" README.rst)"
+      "Bash(grep -n \"sbt artifact\\\\` \\(assumed already installed\\)\\\\|webapptemplate:<version>\\\\`\\\\`.*webapptemplate:latest\" README.rst)",
+      "Bash(sbt \"e2etest/launchTestBrowser\")",
+      "Bash(echo \"started with PID $!\")",
+      "Bash(kill -0 32556)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(find / -maxdepth 4 -iname \"sbt\" -type f)",
+      "Bash(brew list *)",
+      "Bash(kill -0 32698)",
+      "Bash(curl -s http://127.0.0.1:9222/json/version)",
+      "Bash(curl -s -X PUT \"http://127.0.0.1:9222/json/close/4391FC79DAC3D9E49A39018522299497\")",
+      "Bash(kill -0 34009)",
+      "Bash(curl -s http://127.0.0.1:9222/json/list)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:8888/)",
+      "Bash(python3 -c \"import json,sys; [print\\(t['id'], t['url'], t['title']\\) for t in json.load\\(sys.stdin\\) if t['type']=='page']\")",
+      "Bash(kill -0 34485)",
+      "Bash(python3 -c \"import docutils\")",
+      "Bash(python3 -m docutils.parsers.rst.states README.rst)",
+      "Bash(kill -0 36848)",
+      "Bash(kill -0 36992)",
+      "Bash(curl -s -o /dev/null http://localhost:8888/)",
+      "Bash(git check-ignore *)",
+      "Bash(kill -0 37402)",
+      "Bash(kill -0 37596)",
+      "Bash(git add *)"
     ]
   }
 }

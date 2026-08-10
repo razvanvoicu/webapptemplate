@@ -18,6 +18,7 @@ Technology
 * Google Cloud Firestore for browser-session records
 * ClassGraph for discovering independently loadable route modules
 * MUnit and sbt-scoverage for backend tests and coverage
+* Selenium (in a separate ``e2etest`` project) for end-to-end browser tests against the real, running app
 
 How it works
 ------------
@@ -436,6 +437,112 @@ Coverage instrumentation is disabled for the root project and Scala.js frontend.
 The generated HTML report is
 ``backend/target/scala-3.8.4/scoverage-report/index.html``.
 
+End-to-end tests (Selenium)
+----------------------------
+
+``e2etest`` is a separate sbt project (``e2etest/src/test/scala/``) that drives the real, running application
+through an actual Chrome instance via Selenium, rather than calling backend code directly the way the unit
+suite does. Run it with:
+
+.. code-block:: console
+
+   sbt e2etest/test
+
+That single command does more than run tests — it's a full orchestration, defined by overriding ``e2etest``'s
+``Test / test`` task in ``build.sbt``:
+
+1. Launches a headless Chrome via Selenium (Selenium Manager auto-resolves a matching chromedriver; only a real
+   Chrome install is required) and immediately quits it, failing fast with a clear message if that doesn't work,
+   rather than failing confusingly partway through the first real test.
+2. Checks port 8888 isn't already in use — by a leftover Docker container from manual testing, say — and fails
+   loudly if it is, rather than the next step silently exercising and recording coverage for the wrong process.
+3. Starts the backend in the background via a *nested* ``sbt "project backend" coverage run``, mirroring the
+   ``coverage``/``coverageReport`` workflow above so the HTTP traffic these tests generate is scoverage-
+   instrumented and recorded exactly like the unit suite's own coverage, accumulating into the same measurement
+   data. Its output is captured to ``e2etest/target/e2e-backend.log``.
+4. Polls the backend until it responds (up to 90s) before running anything against it.
+5. Runs the actual Selenium suite.
+6. Stops the backend regardless of whether the tests passed, walking the *entire* process tree (the ``run /
+   fork := true`` backend forks its own child JVM, so stopping just the nested sbt process it started as would
+   leave that JVM orphaned and still bound to the port).
+
+Since Google blocks WebDriver-controlled browsers from driving its login form (see `Authenticated E2E tests`_
+below), ``e2etest/test`` itself only covers what's reachable while signed out — ``sgrv.e2e.HomePageE2ESuite``
+loads the home page and asserts the Google login link is present. ``coverageReport`` is deliberately *not*
+triggered automatically by either ``e2etest/test`` or ``testAuthenticated`` — run it yourself, as a separate
+step, once you've run whichever combination of ``coverage test`` (unit), ``e2etest/test`` (signed-out E2E),
+and/or ``testAuthenticated`` (signed-in E2E) you want reflected; scoverage's measurement data accumulates
+additively across runs until something explicitly cleans ``backend/target``, so a single ``coverageReport``
+afterward can combine all of them into one report rather than any one overwriting another's data.
+
+Authenticated E2E tests
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Why login isn't automated.** Google actively detects and blocks sign-in attempts from WebDriver-controlled
+browsers (the interactive sign-in form specifically, not merely an already-authenticated session) — this is a
+deliberate anti-automation measure on Google's end, not something specific to this app or fixable by using an
+existing Chrome profile (that runs into its own problems: a profile already open in your regular Chrome can't
+also be opened by ChromeDriver, and Chrome's saved-password autofill isn't something WebDriver can drive anyway,
+since it's native browser UI rather than part of the page's DOM). Nor does Google Cloud or Firebase offer an
+emulator for this: ``gcloud emulators`` covers Firestore/Datastore/Bigtable/Pub/Sub/Spanner only, and while the
+separate Firebase Local Emulator Suite does have an Authentication Emulator, it only intercepts calls made
+through the *Firebase Auth SDK* — this app implements the OAuth 2.0 flow directly
+(`Login with Google`_), so there's nothing for it to intercept.
+
+Instead, sign in once by hand and let a later test run reuse that session. Start with:
+
+.. code-block:: console
+
+   sbt e2etest/launchTestBrowser
+
+This leaves three things running (rather than tearing them down the way ``e2etest/test`` does), starting
+whichever of them isn't already up:
+
+1. The local Firestore emulator (``localhost:8880`` per ``test.env``). Sessions are stored there (see
+   ``SessionStore`` in `Testing against a local Firestore emulator`_), and since the emulator is in-memory only,
+   it has to stay running continuously from the sign-in below through to a later ``testAuthenticated`` run, or
+   the session is lost.
+2. The backend, coverage-instrumented (``sbt "project backend" coverage run``), pointed at that emulator.
+3. A visible, remote-debuggable Chrome (``--remote-debugging-port=9222``, using a dedicated profile under
+   ``e2etest/target/test-chrome-profile`` rather than your everyday one — Chrome refuses to open a profile
+   twice, and leaving debugging enabled on your daily-driver profile would let anything on the machine attach to
+   it), opened to the backend's home page at ``http://localhost:8888/``. That's ``localhost``, not
+   ``127.0.0.1``: the backend derives its OAuth ``redirect_uri`` from the request's ``Host`` header verbatim,
+   and only ``http://localhost:8888/auth/callback`` is registered with Google (`Login with Google`_) — visiting
+   via ``127.0.0.1`` instead produces a ``redirect_uri`` Google rejects.
+
+Running ``launchTestBrowser`` again reuses whichever of the three are already up rather than starting duplicates.
+Once it's ready, switch to that Chrome window and sign in with Google as you normally would, then leave that
+window, the backend, and the emulator all running.
+
+With that session live, run:
+
+.. code-block:: console
+
+   sbt e2etest/testAuthenticated
+
+This fails immediately, with a clear message, if the backend or test browser aren't already up — unlike
+``e2etest/test``, it never launches or tears down either itself. It attaches Selenium to the running Chrome via
+the Chrome DevTools Protocol's ``debuggerAddress`` option instead of launching a fresh browser (calling
+``ChromeDriver.quit()`` on such an attached session only ends that WebDriver session; it does not close the
+real browser window), and runs ``sgrv.e2e.SampleSpreadsheetE2ESuite``: enters a spreadsheet name, clicks
+*Create or update spreadsheet*, and asserts the resulting table's last row has a timestamp less than 30 seconds
+old — a real round trip through ``/sheets/upsert`` and ``/sheets/content`` against the signed-in session's
+actual Google Sheets/Drive access. Since it attaches to the same coverage-instrumented backend
+``launchTestBrowser`` started, this traffic accumulates into the same measurement data as everything else.
+
+Rendering README.rst to HTML
+-----------------------------
+
+.. code-block:: console
+
+   sbt readmeToHtml
+
+Renders this file to ``target/README.html`` via `docutils <https://docutils.sourceforge.io/>`_
+(``python3 -m docutils README.rst target/README.html``), for previewing it outside of whatever renders
+``.rst`` for you natively (e.g. GitHub). Requires Python 3 with the ``docutils`` package installed
+(``pip install docutils``); fails with a clear message if either is missing.
+
 Packaging and deployment
 ------------------------
 
@@ -516,6 +623,7 @@ Repository layout
    backend/src/main/resources/Dockerfile
    backend/src/main/resources/web/
    backend/src/test/scala/
+   e2etest/src/test/scala/
    scripts/stopapp.ps1
 
 Forking this template

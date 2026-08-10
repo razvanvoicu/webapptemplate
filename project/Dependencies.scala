@@ -15,6 +15,10 @@ object Dependencies {
   // GsonFactory, declared explicitly so the dependency doesn't rely on that transitive detail.
   lazy val gson            = "com.google.code.gson"  % "gson"                         % "2.10.1"
 
+  // Browser automation for the e2etest project; Selenium Manager (bundled since 4.6) auto-resolves a matching
+  // chromedriver for whatever Chrome is installed, so no separate driver-binary install/PATH management.
+  lazy val selenium        = "org.seleniumhq.selenium" % "selenium-java"               % "4.27.0"
+
   // Scala.js artifacts are declared with `%%%` in build.sbt, which needs a
   // settings scope, so only their versions live here.
   val laminarVersion    = "17.2.1"
