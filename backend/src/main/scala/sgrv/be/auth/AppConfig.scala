@@ -5,14 +5,13 @@ import zio.{System, Task, ZIO, ZLayer}
 private[be] final case class OAuthConfig(clientId: String, clientSecret: String)
 private[auth] final case class FirestoreConfig(projectId: String, databaseId: String, location: String)
 private[be] final case class AppConfig(
-    oauth: OAuthConfig,
-    firestore: FirestoreConfig,
-    googleServices: Seq[String] = Seq.empty
+  oauth: OAuthConfig, 
+  firestore: FirestoreConfig, 
+  googleServices: Seq[String] = Seq.empty
 )
 
 private[be] object AppConfig:
-  def load: Task[AppConfig] =
-    System.envs.flatMap(environment => ZIO.fromEither(fromEnvironment(environment)))
+  def load: Task[AppConfig] = System.envs.flatMap(environment => ZIO.fromEither(fromEnvironment(environment)))
 
   val live: ZLayer[Any, Throwable, AppConfig] = ZLayer.fromZIO(load)
 
@@ -28,7 +27,7 @@ private[be] object AppConfig:
       databaseId   <- required("FIRESTORE_DATABASE_ID")
       location     <- required("FIRESTORE_LOCATION")
     yield AppConfig(
-      OAuthConfig(clientId, clientSecret),
+      OAuthConfig(clientId, clientSecret), 
       FirestoreConfig(projectId, databaseId, location),
       googleServices(environment)
     )

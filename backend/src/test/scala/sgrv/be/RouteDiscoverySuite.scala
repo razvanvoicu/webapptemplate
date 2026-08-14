@@ -4,9 +4,9 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import sgrv.be.auth.{GoogleAuthentication, GoogleOAuth, SessionStore, SessionUser}
 import sgrv.be.core.*
-import sgrv.be.sheets.{SheetsClient, SpreadsheetContent}
+import sgrv.be.sheets.SpreadsheetContent
 import zio.*
-import zio.http.{Cookie, Method, Path, Request, Response, Routes, Status, URL, handler}
+import zio.http.{Client, Cookie, Method, Path, Request, Response, Routes, Status, URL, handler}
 
 object EchoPlugin extends BackendPlugin:
   type Requires = Any
@@ -141,7 +141,7 @@ class RouteDiscoverySuite extends munit.FunSuite:
 
   test("an authenticated Sheets request reads its Firestore session only once"):
     val lookups = new AtomicInteger(0)
-    val user    = SessionUser("jane@example.com", "Jane", Some("refresh-token"))
+    val user    = SessionUser("jane@example.com", "Jane")
     val countingStore: SessionStore = new SessionStore:
       override def create(
           sessionKey: String,
@@ -161,28 +161,29 @@ class RouteDiscoverySuite extends munit.FunSuite:
       override def authenticate(code: String, redirectUri: String): Task[GoogleAuthentication] =
         ZIO.fail(new UnsupportedOperationException)
       override def accessToken(refreshToken: String): Task[String] =
-        ZIO.succeed("access-token").when(refreshToken == "refresh-token").someOrFail(new AssertionError(refreshToken))
+        ZIO.fail(new AssertionError("Sheets must reject the missing refresh token before requesting an access token"))
 
-    val sheetsClient: SheetsClient = new SheetsClient:
-      override def findSpreadsheet(accessToken: String, name: String): Task[Option[String]] =
-        ZIO.succeed(Option.when(accessToken == "access-token" && name == "Budget")("spreadsheet-id"))
-      override def createSpreadsheet(accessToken: String, name: String): Task[String] =
-        ZIO.fail(new UnsupportedOperationException)
-      override def appendRow(accessToken: String, spreadsheetId: String, values: Seq[String]): Task[Unit] =
-        ZIO.fail(new UnsupportedOperationException)
-      override def readColumns(accessToken: String, spreadsheetId: String, range: String): Task[Seq[Seq[String]]] =
-        ZIO.succeed(Seq(Seq("timestamp", "browser")))
+    RouteDiscovery.activate(
+      SpreadsheetContent,
+      SpreadsheetContent.getClass.getName,
+      CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore, googleOAuth))
+    ) match
+      case PluginStatus.Skipped(_, _, missing) => assertEquals(missing.map(_.id), Chunk("http-client"))
+      case other                               => fail(s"Expected the generic HTTP capability to be missing, got $other")
 
-    val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore, googleOAuth, sheetsClient))
-    val status   = RouteDiscovery.activate(SpreadsheetContent, SpreadsheetContent.getClass.getName, registry)
-    val routes   = RouteDiscovery.fromStatuses(Seq(status))
-    val request = Request
-      .get(URL.decode("/sheets/content?name=Budget").toOption.get)
-      .addCookie(Cookie.Request("session", "session-key"))
-    val response = run(ZIO.scoped(routes.runZIO(request)))
+    val response = run:
+      (for
+        httpClient <- ZIO.service[Client]
+        registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore, googleOAuth, httpClient))
+        status   = RouteDiscovery.activate(SpreadsheetContent, SpreadsheetContent.getClass.getName, registry)
+        routes   = RouteDiscovery.fromStatuses(Seq(status))
+        request = Request
+          .get(URL.decode("/sheets/content?name=Budget").toOption.get)
+          .addCookie(Cookie.Request("session", "session-key"))
+        response <- ZIO.scoped(routes.runZIO(request))
+      yield response).provide(Client.default)
 
-    assertEquals(response.status, Status.Ok)
-    assertEquals(run(response.body.asString), """{"rows":[["timestamp","browser"]]}""")
+    assertEquals(response.status, Status.Forbidden)
     assertEquals(lookups.get(), 1)
 
   test("resolves a composed capability set with its intersection type intact"):

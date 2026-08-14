@@ -4,13 +4,13 @@ import com.google.gson.{JsonObject, JsonParser}
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.jdk.CollectionConverters.*
-import zio.{Task, ZIO, ZLayer}
+import zio.{Task, ZIO}
 import zio.http.{Body, Client, Header, Headers, MediaType, Method, Request, Response, URL}
 
 /** ZIO boundary around the Google Sheets v4 and Drive v3 REST APIs, authenticated with a per-call OAuth access
   * token. Used by the `/sheets` routes to act on Google Sheets on behalf of a signed-in session.
   */
-trait SheetsClient:
+private[sheets] trait SheetsClient:
   def findSpreadsheet(accessToken: String, name: String): Task[Option[String]]
   def createSpreadsheet(accessToken: String, name: String): Task[String]
   def appendRow(accessToken: String, spreadsheetId: String, values: Seq[String]): Task[Unit]
@@ -19,27 +19,9 @@ trait SheetsClient:
   final def ensureSpreadsheet(accessToken: String, name: String): Task[String] =
     findSpreadsheet(accessToken, name).flatMap(_.fold(createSpreadsheet(accessToken, name))(ZIO.succeed))
 
-private[be] object SheetsClient:
-  def findSpreadsheet(accessToken: String, name: String): ZIO[SheetsClient, Throwable, Option[String]] =
-    ZIO.serviceWithZIO[SheetsClient](_.findSpreadsheet(accessToken, name))
-
-  def createSpreadsheet(accessToken: String, name: String): ZIO[SheetsClient, Throwable, String] =
-    ZIO.serviceWithZIO[SheetsClient](_.createSpreadsheet(accessToken, name))
-
-  def ensureSpreadsheet(accessToken: String, name: String): ZIO[SheetsClient, Throwable, String] =
-    ZIO.serviceWithZIO[SheetsClient](_.ensureSpreadsheet(accessToken, name))
-
-  def appendRow(accessToken: String, spreadsheetId: String, values: Seq[String]): ZIO[SheetsClient, Throwable, Unit] =
-    ZIO.serviceWithZIO[SheetsClient](_.appendRow(accessToken, spreadsheetId, values))
-
-  def readColumns(
-      accessToken: String,
-      spreadsheetId: String,
-      range: String
-  ): ZIO[SheetsClient, Throwable, Seq[Seq[String]]] =
-    ZIO.serviceWithZIO[SheetsClient](_.readColumns(accessToken, spreadsheetId, range))
-
-  val live: ZLayer[Client, Nothing, SheetsClient] = ZLayer.fromFunction(Live.apply)
+private[sheets] object SheetsClient:
+  /** Constructs the Sheets plugin's private API adapter from the host's generic HTTP client capability. */
+  def fromClient(client: Client): SheetsClient = Live(client)
 
   private final case class Live(client: Client) extends SheetsClient:
     private val driveFilesUrl  = "https://www.googleapis.com/drive/v3/files"

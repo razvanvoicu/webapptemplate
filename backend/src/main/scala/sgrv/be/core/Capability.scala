@@ -30,40 +30,28 @@ object CapabilityRegistry:
   */
 sealed trait CapabilitySet[R]:
   self =>
-  private[core] def resolve(
-      registry: CapabilityRegistry
-  ): Either[Chunk[MissingCapability], ZEnvironment[R]]
-
-  final def ++[R2](that: CapabilitySet[R2]): CapabilitySet[R & R2] =
-    CapabilitySet.Both(self, that)
+    private[core] def resolve(registry: CapabilityRegistry): Either[Chunk[MissingCapability], ZEnvironment[R]]
+    final def ++[R2](that: CapabilitySet[R2]): CapabilitySet[R & R2] = CapabilitySet.Both(self, that)
 
 object CapabilitySet:
   val empty: CapabilitySet[Any] = Empty
-
   def one[A](capability: Capability[A]): CapabilitySet[A] = One(capability)
 
   private case object Empty extends CapabilitySet[Any]:
-    override def resolve(
-        registry: CapabilityRegistry
-    ): Either[Chunk[MissingCapability], ZEnvironment[Any]] = Right(ZEnvironment.empty)
+    override def resolve(registry: CapabilityRegistry): Either[Chunk[MissingCapability], ZEnvironment[Any]] =
+      Right(ZEnvironment.empty)
 
   private final case class One[A](capability: Capability[A]) extends CapabilitySet[A]:
-    override def resolve(
-        registry: CapabilityRegistry
-    ): Either[Chunk[MissingCapability], ZEnvironment[A]] =
+    override def resolve(registry: CapabilityRegistry): Either[Chunk[MissingCapability], ZEnvironment[A]] =
       registry
         .get(capability)
         .map(value => ZEnvironment(value)(using capability.tag))
         .toRight(Chunk.single(MissingCapability(capability.id)))
 
-  private final case class Both[A, B](left: CapabilitySet[A], right: CapabilitySet[B])
-      extends CapabilitySet[A & B]:
-    override def resolve(
-        registry: CapabilityRegistry
-    ): Either[Chunk[MissingCapability], ZEnvironment[A & B]] =
+  private final case class Both[A, B](left: CapabilitySet[A], right: CapabilitySet[B]) extends CapabilitySet[A & B]:
+    override def resolve(registry: CapabilityRegistry): Either[Chunk[MissingCapability], ZEnvironment[A & B]] =
       (left.resolve(registry), right.resolve(registry)) match
-        case (Right(leftEnvironment), Right(rightEnvironment)) =>
-          Right(leftEnvironment.unionAll(rightEnvironment))
+        case (Right(leftEnvironment), Right(rightEnvironment)) => Right(leftEnvironment.unionAll(rightEnvironment))
         case (Left(leftMissing), Left(rightMissing)) => Left(leftMissing ++ rightMissing)
-        case (Left(missing), _)                      => Left(missing)
-        case (_, Left(missing))                      => Left(missing)
+        case (Left(missing), _) => Left(missing)
+        case (_, Left(missing)) => Left(missing)

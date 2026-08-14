@@ -5,7 +5,7 @@ import sgrv.be.auth.{GoogleOAuth, SessionStore, SessionUser}
 import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 import java.time.Instant
 import zio.{IO, ZIO}
-import zio.http.{Header, Method, Request, Response, Routes, Status, handler}
+import zio.http.{Client, Header, Method, Request, Response, Routes, Status, handler}
 
 /** Shared plumbing for the `/sheets` routes. */
 private[sheets] object SheetsRoutes:
@@ -53,13 +53,13 @@ private[sheets] object SheetsRoutes:
   * this request's server timestamp and the requesting browser's User-Agent.
   */
 object UpsertSpreadsheet extends BackendPlugin:
-  type Requires = GoogleOAuth & SessionStore & SheetsClient
+  type Requires = GoogleOAuth & SessionStore & Client
 
   override val id = "sheets-upsert"
   override val requirements: CapabilitySet[Requires] =
     CapabilitySet.one(BackendCapabilities.googleOAuth) ++
       CapabilitySet.one(BackendCapabilities.sessionStore) ++
-      CapabilitySet.one(BackendCapabilities.sheetsClient)
+      CapabilitySet.one(BackendCapabilities.httpClient)
   override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Authenticated
   override val routes: Routes[Requires & RequestContext, Nothing] =
     Routes(Method.POST / "sheets" / "upsert" -> handler(SheetsRoutes.authenticatedRequest.flatMap(apply)))
@@ -73,9 +73,11 @@ object UpsertSpreadsheet extends BackendPlugin:
         refreshToken  <- requireRefreshToken(authenticated.user)
         name          <- requireName(request)
         accessToken   <- GoogleOAuth.accessToken(refreshToken).mapError(upstreamError)
-        spreadsheetId <- SheetsClient.ensureSpreadsheet(accessToken, name).mapError(upstreamError)
+        httpClient    <- ZIO.service[Client]
+        sheetsClient   = SheetsClient.fromClient(httpClient)
+        spreadsheetId <- sheetsClient.ensureSpreadsheet(accessToken, name).mapError(upstreamError)
         userAgent = request.header(Header.UserAgent).map(_.renderedValue).getOrElse("unknown")
-        _ <- SheetsClient.appendRow(accessToken, spreadsheetId, Seq(Instant.now().toString, userAgent))
+        _ <- sheetsClient.appendRow(accessToken, spreadsheetId, Seq(Instant.now().toString, userAgent))
           .mapError(upstreamError)
       yield Response.json(s"""{"spreadsheetId":${quote(spreadsheetId)}}""")
     result.merge
@@ -90,13 +92,13 @@ object UpsertSpreadsheet extends BackendPlugin:
   * with that name exists yet for the signed-in user.
   */
 object SpreadsheetContent extends BackendPlugin:
-  type Requires = GoogleOAuth & SessionStore & SheetsClient
+  type Requires = GoogleOAuth & SessionStore & Client
 
   override val id = "sheets-content"
   override val requirements: CapabilitySet[Requires] =
     CapabilitySet.one(BackendCapabilities.googleOAuth) ++
       CapabilitySet.one(BackendCapabilities.sessionStore) ++
-      CapabilitySet.one(BackendCapabilities.sheetsClient)
+      CapabilitySet.one(BackendCapabilities.httpClient)
   override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Authenticated
   override val routes: Routes[Requires & RequestContext, Nothing] =
     Routes(Method.GET / "sheets" / "content" -> handler(SheetsRoutes.authenticatedRequest.flatMap(apply)))
@@ -111,9 +113,11 @@ object SpreadsheetContent extends BackendPlugin:
         name <- ZIO
           .fromOption(request.queryParam("name").map(_.trim).filter(_.nonEmpty))
           .orElseFail(badRequest("Missing \"name\" query parameter"))
-        accessToken   <- GoogleOAuth.accessToken(refreshToken).mapError(upstreamError)
-        spreadsheetId <- SheetsClient.findSpreadsheet(accessToken, name).mapError(upstreamError)
+        accessToken <- GoogleOAuth.accessToken(refreshToken).mapError(upstreamError)
+        httpClient  <- ZIO.service[Client]
+        sheetsClient = SheetsClient.fromClient(httpClient)
+        spreadsheetId <- sheetsClient.findSpreadsheet(accessToken, name).mapError(upstreamError)
         rows <- spreadsheetId.fold(ZIO.succeed(Seq.empty[Seq[String]])):
-          id => SheetsClient.readColumns(accessToken, id, "A:B").mapError(upstreamError)
+          id => sheetsClient.readColumns(accessToken, id, "A:B").mapError(upstreamError)
       yield Response.json(rowsJson(rows))
     result.merge

@@ -46,6 +46,11 @@ set from the services supplied by ``Main``, closes the routes over precisely tha
 plugin. A plugin with missing capabilities, an incompatible API version, an initialization failure, or a route
 conflict is reported and isolated without preventing other plugins from loading.
 
+Capabilities are host facilities, not plugin implementations. The host exposes generic services such as the
+HTTP client and session store; a plugin owns API-specific adapters such as ``SheetsClient`` and constructs them
+from those generic facilities. Consequently, adding a plugin does not require adding its private services to
+``Main`` or ``BackendEnvironment``.
+
 The Scala.js linker runs as a backend resource generator. Its ``main.js`` and
 source map are copied into the backend's managed ``web`` resources beside the
 hand-written ``index.html`` and ``style.css`` files. Consequently, one backend
@@ -393,6 +398,10 @@ a compile-time error. ``AccessPolicy`` is contravariant, allowing ``Public`` or 
 of the plugin environment. Authenticated handlers can obtain the already-resolved user by reading
 ``RequestContext`` and matching ``RequestContext.Authenticated``.
 
+Keep plugin-specific services inside the plugin JAR. For example, the Sheets plugins require the generic
+``BackendCapabilities.httpClient`` capability and construct their private ``SheetsClient`` adapter from it; the
+host neither registers nor depends on a Sheets capability.
+
 The available policies are ``Public``, ``Authenticated``, ``AdminPassword``, and
 ``AuthenticatedAndAdminPassword``. ClassGraph discovers implementations of the nominal JVM interface; there is
 no reflective cast to a generic Scala function. Plugin IDs and API versions are validated, and duplicate route
@@ -711,13 +720,12 @@ worked examples of the shapes a new route is likely to take:
   resulting ``RequestContext.Authenticated`` to reach ``SessionUser.refreshToken``.
 * **A route reachable by password instead of, or in addition to, a session** — ``sgrv.be.debug.Debug`` uses
   ``AuthenticatedAndAdminPassword``; use ``AdminPassword`` for password-only access.
-* **Calling a *different* Google API on the user's behalf** — ``sgrv.be.sheets.SheetsClient`` is the model:
-  a ZIO service trait, a companion of ``ZIO.serviceWithZIO`` accessors, and a ``Live`` case class that
-  authenticates a ``zio.http.Client`` call with a Bearer access token from ``GoogleOAuth.accessToken``. To wrap a
-  new Google API (Calendar, Gmail, Docs, ...): add its scope(s) to ``GOOGLE_SERVICES``, copy ``SheetsClient``'s
-  shape for that API's REST calls, wire its ``live`` layer into ``BackendEnvironment``, ``BackendCapabilities``,
-  and the ``ZLayer.make`` call in ``Main.scala`` next to ``SheetsClient.live``, and add a plugin modeled on
-  ``backend/src/main/scala/sgrv/be/sheets/Sheets.scala``.
+* **Calling a *different* Google API on the user's behalf** — ``sgrv.be.sheets.SheetsClient`` is the model: a
+  plugin-private adapter constructed from the host's generic ``zio.http.Client`` capability, authenticating calls
+  with a Bearer access token from ``GoogleOAuth.accessToken``. To wrap a new Google API (Calendar, Gmail, Docs,
+  ...), add its scope(s) to ``GOOGLE_SERVICES``, bundle an adapter like ``SheetsClient`` in the plugin, require
+  ``BackendCapabilities.httpClient``, and construct the adapter inside the plugin. No API-specific service is
+  added to ``BackendEnvironment`` or ``Main``.
 
 Security warning
 ----------------
