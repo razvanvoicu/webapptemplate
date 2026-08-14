@@ -1,96 +1,293 @@
 package sgrv.be
 
-import sgrv.be.core.{Method, Route, RouteDiscovery}
-import sgrv.be.debug.Debug
+import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
+import sgrv.be.auth.{GoogleAuthentication, GoogleOAuth, SessionStore, SessionUser}
+import sgrv.be.core.*
+import sgrv.be.sheets.{SheetsClient, SpreadsheetContent}
 import zio.*
-import zio.http.{Method as ZioMethod, Path, Request, Response, Status, URL}
+import zio.http.{Cookie, Method, Path, Request, Response, Routes, Status, URL, handler}
 
-@Route(methods = Array(Method.POST, Method.PUT), path = "/echo", auth = false)
-object EchoRoute extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
-  override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
-    ZIO.succeed(Response.text(s"${request.method.name}:${request.url.path}"))
+object EchoPlugin extends BackendPlugin:
+  type Requires = Any
 
-@Route(methods = Array(Method.GET), path = "/protected-echo")
-object ProtectedEchoRoute extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
-  override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
-    ZIO.succeed(Response.text("protected"))
+  override val id = "test-echo"
+  override val requirements: CapabilitySet[Requires] = CapabilitySet.empty
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
+  override val routes: Routes[Requires & RequestContext, Nothing] = Routes(
+    Method.POST / "echo" -> handler((request: Request) => Response.text(s"${request.method.name}:${request.url.path}")),
+    Method.PUT / "echo"  -> handler((request: Request) => Response.text(s"${request.method.name}:${request.url.path}"))
+  )
 
-@Route(methods = Array(Method.GET), path = "/admin-echo", auth = false, adminPwd = true)
-object AdminEchoRoute extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
-  override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
-    ZIO.succeed(Response.text("admin"))
+object ProtectedEchoPlugin extends BackendPlugin:
+  type Requires = SessionStore
 
-object InvalidRoute
+  override val id = "test-protected-echo"
+  override val requirements: CapabilitySet[Requires] = CapabilitySet.one(BackendCapabilities.sessionStore)
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Authenticated
+  override val routes: Routes[Requires & RequestContext, Nothing] =
+    Routes(
+      Method.GET / "protected-echo" -> handler:
+        ZIO.serviceWith[RequestContext]:
+          case RequestContext.Authenticated(_, user) => Response.text(user.email)
+          case RequestContext.Public(_)              => Response.status(Status.InternalServerError)
+    )
+
+object IncompatiblePlugin extends BackendPlugin:
+  type Requires = Any
+
+  override val id = "test-incompatible"
+  override val apiVersion = BackendPlugin.ApiVersion + 1
+  override val requirements: CapabilitySet[Requires] = CapabilitySet.empty
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
+  override val routes: Routes[Requires & RequestContext, Nothing] = Routes.empty
+
+object FailedPlugin extends BackendPlugin:
+  type Requires = Any
+
+  override val id = "test-failed"
+  override val requirements: CapabilitySet[Requires] = CapabilitySet.empty
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
+  override def routes: Routes[Requires & RequestContext, Nothing] =
+    throw new IllegalStateException("activation failed")
+
+object InvalidPlugin
+
+trait TestAlpha:
+  def value: String
+
+trait TestBeta:
+  def value: String
 
 class RouteDiscoverySuite extends munit.FunSuite:
+  private val sessionStore: SessionStore = new SessionStore:
+    override def create(
+        sessionKey: String,
+        user: SessionUser,
+        createdAt: Instant,
+        expiresAt: Instant,
+        refreshToken: Option[String]
+    ): Task[Unit] = ZIO.unit
+
+    override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] = ZIO.none
+
+  private val sessionRegistry = CapabilityRegistry.fromEnvironment(ZEnvironment(sessionStore))
 
   private def run[A](effect: Task[A]): A =
     Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe.run(effect).getOrThrowFiberFailure()
     }
 
-  test("discovers the annotated Debug route object"):
-    val discovered = run(RouteDiscovery.discover())
-    val debugRoutes = discovered.filter(_.path == "/debug")
+  test("loads a nominal plugin object and activates its native routes"):
+    val loaded = run(RouteDiscovery.load(EchoPlugin.getClass.getName, getClass.getClassLoader))
+    val status = RouteDiscovery.activate(loaded, EchoPlugin.getClass.getName, CapabilityRegistry.empty)
+    val routes = RouteDiscovery.fromStatuses(Seq(status))
+    val request = Request(method = Method.POST, url = URL.decode("/echo").toOption.get)
+    val response = run(ZIO.scoped(routes.runZIO(request)))
 
-    assertEquals(debugRoutes.size, 1)
-    assertEquals(debugRoutes.head.methods, Seq(ZioMethod.GET))
-    assert(debugRoutes.head.handler.asInstanceOf[AnyRef] eq Debug)
+    assertEquals(loaded.id, "test-echo")
+    assertEquals(run(response.body.asString), "POST:/echo")
+    assert(routes.routes.exists(_.routePattern.matches(Method.PUT, Path("/echo"))))
 
-  test("loads every declared method and forwards the request to the module"):
-    val discovered = run(RouteDiscovery.load(EchoRoute.getClass.getName, getClass.getClassLoader))
-    val routes     = RouteDiscovery.fromDiscovered(Seq(discovered))
-    val request    = Request(method = ZioMethod.POST, url = URL.decode("/echo").toOption.get)
-    val response   = run(ZIO.scoped(routes.runZIO(request)).asInstanceOf[Task[Response]])
-    val body       = run(response.body.asString)
+  test("skips a plugin when its typed capability requirements cannot be resolved"):
+    val status = RouteDiscovery.activate(
+      ProtectedEchoPlugin,
+      ProtectedEchoPlugin.getClass.getName,
+      CapabilityRegistry.empty
+    )
 
-    assertEquals(discovered.methods, Seq(ZioMethod.POST, ZioMethod.PUT))
-    assert(!discovered.auth)
-    assert(!discovered.adminPwd)
-    assertEquals(body, "POST:/echo")
-    assert(routes.routes.exists(_.routePattern.matches(ZioMethod.PUT, Path("/echo"))))
+    status match
+      case PluginStatus.Skipped(id, _, missing) =>
+        assertEquals(id, "test-protected-echo")
+        assertEquals(missing.map(_.id), Chunk("session-store"))
+      case other => fail(s"Expected a skipped plugin, got $other")
 
-  test("defaults @Route to auth = true and rejects an unauthenticated request before the handler runs"):
-    val discovered = run(RouteDiscovery.load(ProtectedEchoRoute.getClass.getName, getClass.getClassLoader))
-    val routes     = RouteDiscovery.fromDiscovered(Seq(discovered))
-    val request    = Request(method = ZioMethod.GET, url = URL.decode("/protected-echo").toOption.get)
-    val response   = run(ZIO.scoped(routes.runZIO(request)).asInstanceOf[Task[Response]])
+  test("closes an activated plugin over the resolved environment and applies its access policy"):
+    val status = RouteDiscovery.activate(ProtectedEchoPlugin, ProtectedEchoPlugin.getClass.getName, sessionRegistry)
+    val routes = RouteDiscovery.fromStatuses(Seq(status))
+    val request = Request.get(URL.decode("/protected-echo").toOption.get)
+    val response = run(ZIO.scoped(routes.runZIO(request)))
 
-    assert(discovered.auth)
     assertEquals(response.status, Status.Unauthorized)
 
-  test("rejects a request to an adminPwd route with no ADMIN_PASSWORD configured, without invoking the handler"):
-    val discovered = run(RouteDiscovery.load(AdminEchoRoute.getClass.getName, getClass.getClassLoader))
-    val routes     = RouteDiscovery.fromDiscovered(Seq(discovered))
-    val request    = Request(method = ZioMethod.GET, url = URL.decode("/admin-echo?pwd=anything").toOption.get)
-    val response   = run(ZIO.scoped(routes.runZIO(request)).asInstanceOf[Task[Response]])
+  test("resolves an authenticated session once and supplies its user to the route context"):
+    val lookups = new AtomicInteger(0)
+    val user    = SessionUser("jane@example.com", "Jane", Some("refresh-token"))
+    val countingStore: SessionStore = new SessionStore:
+      override def create(
+          sessionKey: String,
+          user: SessionUser,
+          createdAt: Instant,
+          expiresAt: Instant,
+          refreshToken: Option[String]
+      ): Task[Unit] = ZIO.unit
 
-    assert(discovered.adminPwd)
-    assert(!discovered.auth)
-    // The test process runs with no ADMIN_PASSWORD set, so the route must fail closed rather than fall open.
-    assertEquals(response.status, Status.ServiceUnavailable)
+      override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] =
+        ZIO.succeed:
+          lookups.incrementAndGet()
+          Option.when(sessionKey == "session-key")(user)
 
-  test("discovers the /sheets routes requiring a session by default, without an admin password"):
-    val discovered = run(RouteDiscovery.discover())
-    val upsert     = discovered.find(_.path == "/sheets/upsert")
-    val content    = discovered.find(_.path == "/sheets/content")
+    val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore))
+    val status   = RouteDiscovery.activate(ProtectedEchoPlugin, ProtectedEchoPlugin.getClass.getName, registry)
+    val routes   = RouteDiscovery.fromStatuses(Seq(status))
+    val request = Request
+      .get(URL.decode("/protected-echo").toOption.get)
+      .addCookie(Cookie.Request("session", "session-key"))
+    val response = run(ZIO.scoped(routes.runZIO(request)))
 
-    assert(upsert.exists(route => route.auth && !route.adminPwd && route.methods == Seq(ZioMethod.POST)))
-    assert(content.exists(route => route.auth && !route.adminPwd && route.methods == Seq(ZioMethod.GET)))
+    assertEquals(response.status, Status.Ok)
+    assertEquals(run(response.body.asString), user.email)
+    assertEquals(lookups.get(), 1)
 
-  test("rejects an object that is not a request handler"):
-    val result = run(RouteDiscovery.load(InvalidRoute.getClass.getName, getClass.getClassLoader).either)
-    val error = result match
-      case Left(value: IllegalArgumentException) => value
-      case Left(value) => fail(s"Expected IllegalArgumentException, got ${value.getClass.getName}: ${value.getMessage}")
-      case Right(value) => fail(s"Expected route loading to fail, got $value")
+  test("an authenticated Sheets request reads its Firestore session only once"):
+    val lookups = new AtomicInteger(0)
+    val user    = SessionUser("jane@example.com", "Jane", Some("refresh-token"))
+    val countingStore: SessionStore = new SessionStore:
+      override def create(
+          sessionKey: String,
+          user: SessionUser,
+          createdAt: Instant,
+          expiresAt: Instant,
+          refreshToken: Option[String]
+      ): Task[Unit] = ZIO.unit
 
-    assert(error.getMessage.contains("must extend the backend route handler type"))
+      override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] =
+        ZIO.succeed:
+          lookups.incrementAndGet()
+          Option.when(sessionKey == "session-key")(user)
 
-  test("combines discovered routes with the unchanged static routes"):
-    val sRoutes = run(ZIO.succeed(Main.staticRoutes))
-    val dRoutes = run(RouteDiscovery.routes)
+    val googleOAuth: GoogleOAuth = new GoogleOAuth:
+      override def authorizationUrl(redirectUri: String, state: String): UIO[String] = ZIO.succeed("")
+      override def authenticate(code: String, redirectUri: String): Task[GoogleAuthentication] =
+        ZIO.fail(new UnsupportedOperationException)
+      override def accessToken(refreshToken: String): Task[String] =
+        ZIO.succeed("access-token").when(refreshToken == "refresh-token").someOrFail(new AssertionError(refreshToken))
 
-    assert(dRoutes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/debug"))))
-    Seq("/", "/index.html", "/style.css", "/main.js", "/main.js.map").foreach: path =>
-      assert(sRoutes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path(path))), clues(path))
+    val sheetsClient: SheetsClient = new SheetsClient:
+      override def findSpreadsheet(accessToken: String, name: String): Task[Option[String]] =
+        ZIO.succeed(Option.when(accessToken == "access-token" && name == "Budget")("spreadsheet-id"))
+      override def createSpreadsheet(accessToken: String, name: String): Task[String] =
+        ZIO.fail(new UnsupportedOperationException)
+      override def appendRow(accessToken: String, spreadsheetId: String, values: Seq[String]): Task[Unit] =
+        ZIO.fail(new UnsupportedOperationException)
+      override def readColumns(accessToken: String, spreadsheetId: String, range: String): Task[Seq[Seq[String]]] =
+        ZIO.succeed(Seq(Seq("timestamp", "browser")))
+
+    val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore, googleOAuth, sheetsClient))
+    val status   = RouteDiscovery.activate(SpreadsheetContent, SpreadsheetContent.getClass.getName, registry)
+    val routes   = RouteDiscovery.fromStatuses(Seq(status))
+    val request = Request
+      .get(URL.decode("/sheets/content?name=Budget").toOption.get)
+      .addCookie(Cookie.Request("session", "session-key"))
+    val response = run(ZIO.scoped(routes.runZIO(request)))
+
+    assertEquals(response.status, Status.Ok)
+    assertEquals(run(response.body.asString), """{"rows":[["timestamp","browser"]]}""")
+    assertEquals(lookups.get(), 1)
+
+  test("resolves a composed capability set with its intersection type intact"):
+    val alpha: TestAlpha = new TestAlpha:
+      override val value = "alpha"
+    val beta: TestBeta = new TestBeta:
+      override val value = "beta"
+    val alphaCapability  = Capability[TestAlpha]("test-alpha")
+    val betaCapability   = Capability[TestBeta]("test-beta")
+    val registry         = CapabilityRegistry.fromEnvironment(ZEnvironment(alpha, beta))
+    val plugin = new BackendPlugin:
+      type Requires = TestAlpha & TestBeta
+
+      override val id = "test-composed-environment"
+      override val requirements: CapabilitySet[Requires] =
+        CapabilitySet.one(alphaCapability) ++ CapabilitySet.one(betaCapability)
+      override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
+      override val routes: Routes[Requires & RequestContext, Nothing] = Routes(
+        Method.GET / "composed" -> handler:
+          for
+            a <- ZIO.service[TestAlpha]
+            b <- ZIO.service[TestBeta]
+          yield Response.text(s"${a.value}:${b.value}")
+      )
+    val status   = RouteDiscovery.activate(plugin, "ComposedPlugin", registry)
+    val routes   = RouteDiscovery.fromStatuses(Seq(status))
+    val response = run(ZIO.scoped(routes.runZIO(Request.get(URL.decode("/composed").toOption.get))))
+    val missing  = RouteDiscovery.activate(plugin, "ComposedPlugin", CapabilityRegistry.empty)
+
+    assertEquals(run(response.body.asString), "alpha:beta")
+    missing match
+      case PluginStatus.Skipped(_, _, capabilities) =>
+        assertEquals(capabilities.map(_.id), Chunk("test-alpha", "test-beta"))
+      case other => fail(s"Expected both missing capabilities, got $other")
+
+  test("rejects a plugin compiled for an incompatible plugin API"):
+    val status = RouteDiscovery.activate(IncompatiblePlugin, IncompatiblePlugin.getClass.getName, CapabilityRegistry.empty)
+
+    status match
+      case PluginStatus.Rejected(_, reason) => assert(reason.contains("API version"), reason)
+      case other                            => fail(s"Expected a rejected plugin, got $other")
+
+  test("isolates a plugin that throws while constructing its routes"):
+    val status = RouteDiscovery.activate(FailedPlugin, FailedPlugin.getClass.getName, CapabilityRegistry.empty)
+
+    status match
+      case PluginStatus.Failed(id, _, cause) =>
+        assertEquals(id, "test-failed")
+        assertEquals(cause.getMessage, "activation failed")
+      case other => fail(s"Expected a failed plugin, got $other")
+
+  test("rejects every plugin involved in an overlapping route pattern"):
+    val first = PluginStatus.Active(
+      "first",
+      "First",
+      Routes(Method.GET / "collision" -> handler(Response.ok))
+    )
+    val second = PluginStatus.Active(
+      "second",
+      "Second",
+      Routes(Method.GET / "collision" -> handler(Response.ok))
+    )
+    val statuses = RouteDiscovery.rejectConflicts(Seq(first, second))
+
+    assert(statuses.forall(_.isInstanceOf[PluginStatus.Rejected]), statuses)
+    assertEquals(RouteDiscovery.fromStatuses(statuses).routes.size, 0)
+
+  test("rejects every active plugin sharing the same stable id"):
+    val first  = PluginStatus.Active("duplicate", "First", Routes.empty)
+    val second = PluginStatus.Active("duplicate", "Second", Routes.empty)
+    val statuses = RouteDiscovery.rejectDuplicateIds(Seq(first, second))
+
+    assert(statuses.forall(_.isInstanceOf[PluginStatus.Rejected]), statuses)
+
+  test("rejects a dynamically requested route pattern reserved by the static application"):
+    val active = PluginStatus.Active(
+      "reserved",
+      "Reserved",
+      Routes(Method.GET / "index.html" -> handler(Response.ok))
+    )
+    val statuses = RouteDiscovery.rejectConflicts(Seq(active), Set(Method.GET / "index.html"))
+
+    assert(statuses.head.isInstanceOf[PluginStatus.Rejected], statuses)
+
+  test("rejects a module that does not implement the nominal plugin contract"):
+    val result = run(RouteDiscovery.load(InvalidPlugin.getClass.getName, getClass.getClassLoader).either)
+
+    result match
+      case Left(error: IllegalArgumentException) => assert(error.getMessage.contains("does not implement"), error)
+      case Left(error) => fail(s"Expected IllegalArgumentException, got ${error.getClass.getName}: ${error.getMessage}")
+      case Right(value) => fail(s"Expected plugin loading to fail, got $value")
+
+  test("discovers plugins independently and keeps their activation outcomes"):
+    val statuses = run(RouteDiscovery.discover(sessionRegistry))
+
+    assert(statuses.exists {
+      case PluginStatus.Active("debug", _, _) => true
+      case _                                  => false
+    })
+    assert(statuses.exists {
+      case PluginStatus.Rejected(className, reason) =>
+        className.contains("IncompatiblePlugin") && reason.contains("API version")
+      case _ => false
+    })
+    assert(statuses.exists {
+      case PluginStatus.Failed("test-failed", _, _) => true
+      case _                                         => false
+    })

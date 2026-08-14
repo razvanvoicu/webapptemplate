@@ -1,7 +1,7 @@
 package sgrv.be
 
 import sgrv.be.auth.{AppConfig, DatabaseAdmin, GoogleOAuth, SessionStore, TokenGenerator}
-import sgrv.be.core.RouteDiscovery
+import sgrv.be.core.{CapabilityRegistry, RouteDiscovery}
 import sgrv.be.sheets.SheetsClient
 import zio.*
 import zio.http.*
@@ -36,7 +36,6 @@ object Main extends ZIOAppDefault:
   import zio.http.Header.{CacheControl, ContentType}
   import MediaType.{text, application}
   import Status.{NotFound, InternalServerError}
-  import RouteDiscovery.routes
 
   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] = Runtime.removeDefaultLoggers >>> consoleLogger(loggerConfig)
 
@@ -96,12 +95,15 @@ object Main extends ZIOAppDefault:
       args              <- getArgs
       p                 <- port(args)
       host              <- bindAddress
-      applicationRoutes <- routes.map(staticRoutes ++ _)
+      environment       <- ZIO.environment[BackendEnvironment]
+      registry           = CapabilityRegistry.fromEnvironment(environment)
+      reservedPatterns   = staticRoutes.routes.map(_.routePattern: Any).toSet
+      applicationRoutes <- RouteDiscovery.routes(registry, reservedPatterns).map(staticRoutes ++ _)
       _ <- DatabaseAdmin.ensureDatabase.catchAll: error =>
         ZIO.logWarning(s"Could not ensure the Firestore database: ${error.getMessage}")
       _ <- ZIO.logInfo(s"Serving on http://$host:$p/")
       _ <- Server
         .serve(applicationRoutes @@ HandlerAspect.requestLogging())
-        .provideSome[BackendEnvironment](Server.defaultWith(_ => serverConfig(host, p)))
+        .provide(Server.defaultWith(_ => serverConfig(host, p)))
     yield ()
     unit.provideSome[ZIOAppArgs](backendLayer)

@@ -5,19 +5,21 @@ import java.lang.management.ManagementFactory
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.TimeUnit
-import sgrv.be.BackendEnvironment
-import sgrv.be.core.{Method, Route}
+import sgrv.be.BackendCapabilities
+import sgrv.be.auth.SessionStore
+import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 import scala.jdk.CollectionConverters.*
 import zio.{IO, Task, UIO, ZIO}
-import zio.http.{Header, Request, Response}
+import zio.http.{Header, Method, Response, Routes, handler}
 
-// Declared `auth = false, adminPwd = true`: reachable without a Google session, but only with the correct
-// `?pwd=` admin password, since it exposes sensitive diagnostic data including environment-variable values.
-@Route(methods = Array(Method.GET), path = "/debug", auth = true, adminPwd = true)
-object Debug extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
+object Debug extends BackendPlugin:
+  type Requires = SessionStore
 
-  override def apply(_request: Request): ZIO[BackendEnvironment, Nothing, Response] =
-    response
+  override val id = "debug"
+  override val requirements: CapabilitySet[Requires] = CapabilitySet.one(BackendCapabilities.sessionStore)
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.AuthenticatedAndAdminPassword
+  override val routes: Routes[Requires & RequestContext, Nothing] =
+    Routes(Method.GET / "debug" -> handler(response))
 
   private[debug] def response: UIO[Response] =
     collect(Seq.empty).map ( signature => Response.text(signature).addHeader(Header.CacheControl.NoStore) )

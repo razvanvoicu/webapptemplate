@@ -1,21 +1,22 @@
 package sgrv.be.sheets
 
-import sgrv.be.BackendEnvironment
-import sgrv.be.auth.{GoogleOAuth, SessionAuth}
-import sgrv.be.core.{Method, Route}
+import sgrv.be.BackendCapabilities
+import sgrv.be.auth.{GoogleOAuth, SessionStore, SessionUser}
+import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 import java.time.Instant
 import zio.{IO, ZIO}
-import zio.http.{Header, Request, Response, Status}
+import zio.http.{Header, Method, Request, Response, Routes, Status, handler}
 
 /** Shared plumbing for the `/sheets` routes. */
 private[sheets] object SheetsRoutes:
-  /** Both `/sheets` routes need the signed-in session's stored Google refresh token, not just the yes/no answer
-    * route discovery's `auth = true` gate already checked.
-    */
-  def requireRefreshToken(request: Request): ZIO[BackendEnvironment, Response, String] =
-    SessionAuth.resolve(request).flatMap:
-      case Left(response) => ZIO.fail(response)
-      case Right(user)    => ZIO.fromOption(user.refreshToken).orElseFail(noRefreshTokenResponse)
+  def requireRefreshToken(user: SessionUser): IO[Response, String] =
+    ZIO.fromOption(user.refreshToken).orElseFail(noRefreshTokenResponse)
+
+  /** `Authenticated` is guaranteed by these plugins' access policy; a different context indicates a host bug. */
+  def authenticatedRequest: ZIO[RequestContext, Nothing, RequestContext.Authenticated] =
+    ZIO.service[RequestContext].flatMap:
+      case request: RequestContext.Authenticated => ZIO.succeed(request)
+      case _: RequestContext.Public => ZIO.dieMessage("Authenticated route received a public request context")
 
   private val noRefreshTokenResponse: Response =
     Response
@@ -51,14 +52,25 @@ private[sheets] object SheetsRoutes:
 /** Finds or creates a spreadsheet by name in the signed-in user's Google Drive, then appends one row recording
   * this request's server timestamp and the requesting browser's User-Agent.
   */
-@Route(methods = Array(Method.POST), path = "/sheets/upsert")
-object UpsertSpreadsheet extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
+object UpsertSpreadsheet extends BackendPlugin:
+  type Requires = GoogleOAuth & SessionStore & SheetsClient
+
+  override val id = "sheets-upsert"
+  override val requirements: CapabilitySet[Requires] =
+    CapabilitySet.one(BackendCapabilities.googleOAuth) ++
+      CapabilitySet.one(BackendCapabilities.sessionStore) ++
+      CapabilitySet.one(BackendCapabilities.sheetsClient)
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Authenticated
+  override val routes: Routes[Requires & RequestContext, Nothing] =
+    Routes(Method.POST / "sheets" / "upsert" -> handler(SheetsRoutes.authenticatedRequest.flatMap(apply)))
+
   import SheetsRoutes.*
 
-  override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
+  private def apply(authenticated: RequestContext.Authenticated): ZIO[Requires, Nothing, Response] =
+    val request = authenticated.request
     val result =
       for
-        refreshToken  <- requireRefreshToken(request)
+        refreshToken  <- requireRefreshToken(authenticated.user)
         name          <- requireName(request)
         accessToken   <- GoogleOAuth.accessToken(refreshToken).mapError(upstreamError)
         spreadsheetId <- SheetsClient.ensureSpreadsheet(accessToken, name).mapError(upstreamError)
@@ -77,14 +89,25 @@ object UpsertSpreadsheet extends (Request => ZIO[BackendEnvironment, Nothing, Re
 /** Reports the current content of columns A and B of a spreadsheet by name, or an empty result if no spreadsheet
   * with that name exists yet for the signed-in user.
   */
-@Route(methods = Array(Method.GET), path = "/sheets/content")
-object SpreadsheetContent extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
+object SpreadsheetContent extends BackendPlugin:
+  type Requires = GoogleOAuth & SessionStore & SheetsClient
+
+  override val id = "sheets-content"
+  override val requirements: CapabilitySet[Requires] =
+    CapabilitySet.one(BackendCapabilities.googleOAuth) ++
+      CapabilitySet.one(BackendCapabilities.sessionStore) ++
+      CapabilitySet.one(BackendCapabilities.sheetsClient)
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Authenticated
+  override val routes: Routes[Requires & RequestContext, Nothing] =
+    Routes(Method.GET / "sheets" / "content" -> handler(SheetsRoutes.authenticatedRequest.flatMap(apply)))
+
   import SheetsRoutes.*
 
-  override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
+  private def apply(authenticated: RequestContext.Authenticated): ZIO[Requires, Nothing, Response] =
+    val request = authenticated.request
     val result =
       for
-        refreshToken <- requireRefreshToken(request)
+        refreshToken <- requireRefreshToken(authenticated.user)
         name <- ZIO
           .fromOption(request.queryParam("name").map(_.trim).filter(_.nonEmpty))
           .orElseFail(badRequest("Missing \"name\" query parameter"))

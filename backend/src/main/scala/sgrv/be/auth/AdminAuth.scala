@@ -5,9 +5,9 @@ import java.security.MessageDigest
 import zio.{Cause, System, ZIO}
 import zio.http.{Request, Response, Status}
 
-/** Verifies the `?pwd=` query parameter against the `ADMIN_PASSWORD` environment variable for routes declared
-  * `@Route(adminPwd = true)`, an alternative to a Google session for reaching a diagnostic or admin route directly
-  * by URL.
+/** Verifies the `?pwd=` query parameter against the `ADMIN_PASSWORD` environment variable for plugins using
+  * [[sgrv.be.core.AccessPolicy.AdminPassword]] or
+  * [[sgrv.be.core.AccessPolicy.AuthenticatedAndAdminPassword]].
   */
 private[be] object AdminAuth:
   def reject(request: Request): ZIO[Any, Nothing, Option[Response]] =
@@ -18,7 +18,7 @@ private[be] object AdminAuth:
       configured =>
         configured.map(_.trim).filter(_.nonEmpty) match
           case None =>
-            ZIO.logWarning("ADMIN_PASSWORD is not configured; adminPwd-protected routes are unavailable") *>
+            ZIO.logWarning("ADMIN_PASSWORD is not configured; admin-password-protected plugins are unavailable") *>
               ZIO.succeed(Some(Response.status(Status.ServiceUnavailable)))
           case Some(password) =>
             val provided = request.queryParam("pwd").getOrElse("")

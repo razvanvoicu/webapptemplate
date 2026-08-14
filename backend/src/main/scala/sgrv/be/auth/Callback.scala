@@ -2,23 +2,28 @@ package sgrv.be.auth
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.MessageDigest
-import sgrv.be.BackendEnvironment
-import sgrv.be.core.{Method, Route}
+import sgrv.be.BackendCapabilities
+import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 import zio.{durationInt, Clock, Duration, IO, UIO, ZIO}
-import zio.http.{Cookie, Path, Request, Response, Status, URL}
+import zio.http.{Cookie, Method, Path, Request, Response, Routes, Status, URL, handler}
 
-/** Completes the Google login: verifies the `state`, exchanges the authorization code on the backend, creates an
-  * opaque browser session in Firestore, and sends its key as a cookie before returning to the home page. Declared
-  * `auth = false` because the visitor has no session yet when Google redirects back here.
-  */
-@Route(methods = Array(Method.GET), path = "/auth/callback", auth = false)
-object Callback extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
+/** Completes the Google login and creates an opaque browser session in Firestore. */
+object Callback extends BackendPlugin:
+  type Requires = GoogleOAuth & SessionStore & TokenGenerator
+
+  override val id = "auth-callback"
+  override val requirements: CapabilitySet[Requires] =
+    CapabilitySet.one(BackendCapabilities.googleOAuth) ++
+      CapabilitySet.one(BackendCapabilities.sessionStore) ++
+      CapabilitySet.one(BackendCapabilities.tokenGenerator)
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
+  override val routes: Routes[Requires & RequestContext, Nothing] =
+    Routes(Method.GET / "auth" / "callback" -> handler((request: Request) => apply(request)))
 
   private[auth] val sessionCookieName = "session"
   private val sessionLifetime         = 7.days
 
-  
-  override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
+  private def apply(request: Request): ZIO[Requires, Nothing, Response] =
     val login =
       for
         _ <- checkState(request)

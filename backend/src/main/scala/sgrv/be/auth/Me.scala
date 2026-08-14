@@ -1,18 +1,21 @@
 package sgrv.be.auth
 
-import sgrv.be.core.{Method, Route}
-import sgrv.be.BackendEnvironment
+import sgrv.be.BackendCapabilities
+import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 import zio.ZIO
-import zio.http.{Header, Request, Response}
+import zio.http.{Header, Method, Request, Response, Routes, handler}
 
-/** Resolves the opaque browser session cookie through Firestore and reports its user to the frontend. Declared
-  * `auth = false` because it must respond to unauthenticated requests too, distinguishing that case from a
-  * resolution failure; it performs its own session resolution rather than relying on route-discovery gating.
-  */
-@Route(methods = Array(Method.GET), path = "/me", auth = false)
-object Me extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
+/** Resolves the opaque browser session cookie through Firestore and reports its user to the frontend. */
+object Me extends BackendPlugin:
+  type Requires = SessionStore
 
-  override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
+  override val id = "auth-me"
+  override val requirements: CapabilitySet[Requires] = CapabilitySet.one(BackendCapabilities.sessionStore)
+  override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
+  override val routes: Routes[Requires & RequestContext, Nothing] =
+    Routes(Method.GET / "me" -> handler((request: Request) => apply(request)))
+
+  private def apply(request: Request): ZIO[Requires, Nothing, Response] =
     SessionAuth
       .resolve(request)
       .map:

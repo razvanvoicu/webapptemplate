@@ -1,15 +1,14 @@
 package sgrv.be.auth
 
-import sgrv.be.BackendEnvironment
 import zio.{Cause, Clock, ZIO}
 import zio.http.{Request, Response, Status}
 
 /** Resolves the opaque browser session cookie into its signed-in user. Used by [[Me]] to report the session to the
-  * frontend and by [[sgrv.be.core.RouteDiscovery]] to gate routes declared `@Route(auth = true)`.
+  * frontend and by authenticated access policies to authorize plugins and construct their request context.
   */
 private[be] object SessionAuth:
 
-  def resolve(request: Request): ZIO[BackendEnvironment, Nothing, Either[Response, SessionUser]] =
+  def resolve(request: Request): ZIO[SessionStore, Nothing, Either[Response, SessionUser]] =
     val sessionUser = for
       now <- Clock.instant
       user <- request.cookie(Callback.sessionCookieName) match
@@ -25,9 +24,3 @@ private[be] object SessionAuth:
         case None       => ZIO.succeed(Left(Response.status(Status.Unauthorized)))
       }
     )
-
-  /** As [[resolve]], but discards the resolved user: `None` if the request may proceed, `Some(response)` with the
-    * response to short-circuit with otherwise. Used by [[sgrv.be.core.RouteDiscovery]] to gate `auth = true` routes.
-    */
-  def reject(request: Request): ZIO[BackendEnvironment, Nothing, Option[Response]] =
-    resolve(request).map(_.left.toOption)

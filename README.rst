@@ -16,7 +16,7 @@ Technology
 * Google Sheets v4 / Drive v3 REST APIs (via zio-http's ``Client`` and Gson) as a worked example of using those
   entitlements
 * Google Cloud Firestore for browser-session records
-* ClassGraph for discovering independently loadable route modules
+* ClassGraph for discovering independently loadable, capability-checked backend plugins
 * MUnit and sbt-scoverage for backend tests and coverage
 * Selenium (in a separate ``e2etest`` project) for end-to-end browser tests against the real, running app
 
@@ -40,10 +40,11 @@ that information is available.
 
 The backend owns the static-file routes, but application API routes are not
 coupled to ``Main``. ``RouteDiscovery`` scans the ``sgrv.be`` package on the
-runtime classpath for objects annotated with ``@Route`` and converts them into
-ZIO HTTP routes. Route effects declare a ``BackendEnvironment`` containing the
-OAuth, session-store, and token-generation services supplied by ``Main``. The
-current ``sgrv.be.debug.Debug`` object supplies ``/debug``.
+runtime classpath for objects implementing the nominal ``BackendPlugin`` interface. Each plugin returns native
+ZIO HTTP ``Routes`` and couples their environment type to a runtime ``CapabilitySet``. The loader resolves that
+set from the services supplied by ``Main``, closes the routes over precisely that environment, and activates the
+plugin. A plugin with missing capabilities, an incompatible API version, an initialization failure, or a route
+conflict is reported and isolated without preventing other plugins from loading.
 
 The Scala.js linker runs as a backend resource generator. Its ``main.js`` and
 source map are copied into the backend's managed ``web`` resources beside the
@@ -128,15 +129,14 @@ Routes and caching
      - Columns A:B of a named spreadsheet as JSON ``{"rows": [...]}``, or an empty list if it doesn't exist
      - Default
 
-Every discovered route requires a valid browser session by default; see ``auth`` under `Adding a route module`_
-below. ``/auth/login``, ``/auth/callback``, and ``/me`` are declared ``auth = false`` because they must stay
-reachable without a session (see `Login with Google`_ for why each of the three needs that). ``/debug`` keeps the
-default ``auth = true`` and additionally declares ``adminPwd = true``, so reaching it needs both a session and the
-admin password (`Admin-protected routes`_). ``/sheets/upsert`` and ``/sheets/content`` also keep the default
-``auth = true`` with no ``adminPwd``, and additionally resolve the session themselves to reach the signed-in
-user's stored Google refresh token (`Google service entitlements (Sheets)`_). Static routes (``/``,
-``/index.html``, ``/style.css``, ``/main.js``, ``/main.js.map``) are wired directly in ``Main`` rather than
-discovered, so neither ``auth`` nor ``adminPwd`` applies to them.
+Each plugin declares an ``AccessPolicy``; see `Adding a backend plugin`_. ``/auth/login``, ``/auth/callback``, and
+``/me`` use ``AccessPolicy.Public`` because they must serve visitors without an existing session. ``/debug`` uses
+``AuthenticatedAndAdminPassword``, so reaching it needs both a session and the admin password
+(`Admin-protected routes`_). The Sheets plugins use ``Authenticated`` and consume the resulting authenticated
+request context to reach the signed-in user's stored Google refresh token
+(`Google service entitlements (Sheets)`_). Static routes
+(``/``, ``/index.html``, ``/style.css``, ``/main.js``, ``/main.js.map``) are wired directly in ``Main`` and are
+reserved against dynamically loaded route conflicts.
 
 Login with Google
 -----------------
@@ -328,27 +328,26 @@ client libraries) and two routes use it:
 * ``GET /sheets/content?name=<spreadsheet name>`` — returns ``{"rows": [[...], ...]}``, the current content of
   columns A and B, or an empty list if no spreadsheet with that name exists yet.
 
-Both are discovered routes with the default ``auth = true``, so an unauthenticated request never reaches the
-Sheets API; the handlers additionally resolve the session themselves (like ``/me``) to reach
-``SessionUser.refreshToken``. On the frontend, once signed in, a small form under the welcome message
+Both plugins use ``AccessPolicy.Authenticated``, so an unauthenticated request never reaches the Sheets API. The
+policy resolves the session once and supplies its ``SessionUser`` in ``RequestContext.Authenticated``; the
+handlers use that context to reach ``SessionUser.refreshToken`` without a second Firestore read. On the frontend,
+once signed in, a small form under the welcome message
 (``sgrv.fe.Main``) lets you exercise this end to end: enter a spreadsheet name, click "Create or update
 spreadsheet" to call ``/sheets/upsert`` then ``/sheets/content``, and the fetched rows render in a table.
 
 Admin-protected routes
 -----------------------
 
-``adminPwd`` is checked independently of ``auth``, in addition to it rather than instead of it: route discovery
-requires a ``?pwd=`` query parameter equal to the ``ADMIN_PASSWORD`` environment variable before the handler
-runs, regardless of the route's ``auth`` setting; a missing or incorrect password produces ``401 Unauthorized``,
-and a missing or unreadable ``ADMIN_PASSWORD`` produces ``503 Service Unavailable`` (fail closed rather than fall
-open).
+``AccessPolicy.AdminPassword`` requires a ``?pwd=`` query parameter equal to the ``ADMIN_PASSWORD`` environment
+variable before the handler runs. A missing or incorrect password produces ``401 Unauthorized``; a missing or
+unreadable ``ADMIN_PASSWORD`` produces ``503 Service Unavailable`` (fail closed rather than fall open).
+``AuthenticatedAndAdminPassword`` composes that check with browser-session authentication.
 
-The one diagnostic route currently in the template, ``/debug``, declares ``@Route(auth = true, adminPwd = true)``:
-reaching it requires *both* a signed-in Google session and the correct password. Sign in first, then visit
+The ``Debug`` plugin uses ``AccessPolicy.AuthenticatedAndAdminPassword``, so reaching it requires *both* a
+signed-in Google session and the correct password. Sign in first, then visit
 ``https://<host>/debug?pwd=<password>`` directly in the browser's address bar; there is intentionally no on-page
-link or button to it, so it is not an obvious target for a casual or unauthenticated visitor. A route that an
-operator should reach without ever signing in — a health check, say — would instead declare
-``auth = false, adminPwd = true``, reachable by the password alone.
+link or button to it. A plugin that an operator should reach without signing in would instead use
+``AccessPolicy.AdminPassword``.
 
 ``adminPasswordFile`` near the top of ``build.sbt`` (``secretsDir / "admin.pwd"``, see `OAuth configuration
 file`_) points at a plain-text file containing a single line with the admin password, kept outside the repository
@@ -360,42 +359,44 @@ remains secret-free.
 The password travels as a URL query parameter, so treat it like any other bearer credential: it can end up in
 browser history and proxy or server access logs. Rotate ``admin.pwd`` and redeploy if it leaks.
 
-Adding a route module
----------------------
+Adding a backend plugin
+-----------------------
 
-Place each route in its own package below ``sgrv.be``. Its top-level object must
-be annotated with ``sgrv.be.core.Route`` and implement
-``Request => ZIO[BackendEnvironment, Nothing, Response]``. For example:
+Place each plugin in a package below ``sgrv.be`` and make its top-level object implement ``BackendPlugin``. Its
+abstract ``Requires`` type, runtime ``CapabilitySet``, access policy, and native ZIO HTTP routes form one
+compiler-checked contract. For example, an authenticated plugin needing the session store is:
 
 .. code-block:: scala
 
    package sgrv.be.example
 
-   import sgrv.be.BackendEnvironment
-   import sgrv.be.core.{Method, Route}
-   import zio.ZIO
-   import zio.http.{Request, Response}
+   import sgrv.be.BackendCapabilities
+   import sgrv.be.auth.SessionStore
+   import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
+   import zio.http.{Method, Response, Routes, handler}
 
-   @Route(methods = Array(Method.GET), path = "/example")
-   object Example extends (Request => ZIO[BackendEnvironment, Nothing, Response]):
-     override def apply(request: Request): ZIO[BackendEnvironment, Nothing, Response] =
-       ZIO.succeed(Response.text("example"))
+   object Example extends BackendPlugin:
+     type Requires = SessionStore
 
-``Method`` is a Java enum because runtime annotation arguments must be JVM
-annotation constants. Route discovery translates its values into ZIO HTTP
-methods.
+     override val id = "example"
+     override val requirements: CapabilitySet[Requires] =
+       CapabilitySet.one(BackendCapabilities.sessionStore)
+     override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Authenticated
+     override val routes: Routes[Requires & RequestContext, Nothing] =
+       Routes(Method.GET / "example" -> handler(Response.text("example")))
 
-``@Route`` also takes two boolean parameters, checked independently before the handler runs — either can reject the
-request without the handler writing any authentication code itself:
+Combine requirements with ``++``: a ``CapabilitySet[A]`` plus a ``CapabilitySet[B]`` has the type
+``CapabilitySet[A & B]``. Resolution returns ``ZEnvironment[A & B]``; if either capability is absent, the plugin
+is skipped with the missing capability IDs. The plugin's ``routes`` require ``Requires & RequestContext``: route
+discovery supplies the request context after applying the policy, while using an undeclared capability service is
+a compile-time error. ``AccessPolicy`` is contravariant, allowing ``Public`` or a policy requiring only a subset
+of the plugin environment. Authenticated handlers can obtain the already-resolved user by reading
+``RequestContext`` and matching ``RequestContext.Authenticated``.
 
-* ``auth``, defaulting to ``true``. When ``true``, route discovery resolves the browser session cookie: a missing
-  or expired session short-circuits with ``401``, a Firestore error short-circuits with ``503``, and only a valid
-  session reaches the handler. Set ``auth = false`` on a route that must stay reachable without a session, such as
-  ``/auth/login`` or a route that resolves the session itself to report both signed-in and signed-out states, such
-  as ``/me``.
-* ``adminPwd``, defaulting to ``false``. When ``true``, route discovery requires a ``?pwd=`` query parameter
-  matching the ``ADMIN_PASSWORD`` environment variable; see `Admin-protected routes`_. Combine with
-  ``auth = false`` to make a route reachable by password alone, without a Google session.
+The available policies are ``Public``, ``Authenticated``, ``AdminPassword``, and
+``AuthenticatedAndAdminPassword``. ClassGraph discovers implementations of the nominal JVM interface; there is
+no reflective cast to a generic Scala function. Plugin IDs and API versions are validated, and duplicate route
+patterns (including collisions with static routes) reject the involved plugin deterministically.
 
 Logging
 -------
@@ -422,8 +423,9 @@ Run all tests with:
 ``sbt test`` at the root also runs the frontend's Scala.js tests, which need Node.js installed; without it,
 scope the run to the backend with ``sbt "project backend" test``.
 
-The backend tests cover server configuration and static assets, route discovery and its ``auth``/``adminPwd``
-gating, request-log formatting, debug signature generation, OAuth configuration and URL generation (including
+The backend tests cover server configuration and static assets; nominal plugin discovery; typed intersection
+capability resolution; missing-capability skips; access-policy gating; API incompatibility, activation-failure,
+and route-conflict isolation; request-log formatting; debug signature generation; OAuth configuration and URL generation (including
 ``GOOGLE_SERVICES`` parsing and the resulting scope list), user-name fallback, authentication JSON, discovery of
 the authentication and Sheets routes, and the Sheets routes' JSON request/response helpers. They use deterministic
 test data; they do not call Google or a live Firestore/Sheets/Drive API. Generate an scoverage report for the
@@ -631,7 +633,7 @@ Forking this template
 
 Forking this repository to start a new project means replacing every piece of data specific to *this*
 deployment — a GCP project, an OAuth client, a couple of secret files, a handful of settings — while everything
-else described above (route discovery, the ``auth``/``adminPwd`` gating, the session store, the Sheets
+else described above (plugin discovery, capability resolution and access policies, the session store, the Sheets
 integration's plumbing) is generic infrastructure that keeps working unchanged underneath your own routes.
 
 What absolutely needs changing
@@ -663,7 +665,7 @@ What absolutely needs changing
    * ``PORT`` can stay as-is; it is only a local-run default and is overridden by the ``PORT`` a platform like
      Cloud Run injects.
 
-5. **A fresh ``admin.pwd``** — a new random password, if you keep any ``adminPwd = true`` routes at all (see
+5. **A fresh ``admin.pwd``** — a new random password, if you keep any admin-password-protected plugins (see
    "What to keep, drop, or extend" below).
 
 6. **Application Default Credentials for the new project** (`Login with Google`_): locally,
@@ -691,31 +693,30 @@ itself works. ``sgrv.be.debug.Debug`` and the entire ``sgrv.be.sheets`` package,
 *examples* — delete either (and its frontend UI, and its ``GOOGLE_SERVICES`` scopes if dropping Sheets) if your
 project has no use for them, or use them as the template for your own routes.
 
-`Adding a route module`_ above is the generic recipe for a new route; the routes already in the repository are
+`Adding a backend plugin`_ above is the generic recipe for a new route; the routes already in the repository are
 worked examples of the shapes a new route is likely to take:
 
-* **A route with no session at all** — ``sgrv.be.auth.Login`` / ``Callback`` (``auth = false``). Copy this shape
+* **A route with no session at all** — ``sgrv.be.auth.Login`` / ``Callback`` (``AccessPolicy.Public``). Copy this shape
   only if you're adding another pre-authentication entry point, which is uncommon.
 * **The common case: an authenticated route whose handler doesn't need to know who's signed in** — the
-  ``@Route(methods = Array(Method.GET), path = "/example")`` example itself, under `Adding a route module`_.
-  It keeps the default ``auth = true`` and contains no authentication code whatsoever; a request only reaches the
+  ``Example`` plugin under `Adding a backend plugin`_. It uses ``AccessPolicy.Authenticated`` and contains no
+  authentication code in its route; a request only reaches the
   handler once route discovery has already confirmed a valid session. This is the right starting point for most
   new routes.
 * **A route that must serve signed-in and signed-out requests differently** — ``sgrv.be.auth.Me``
-  (``auth = false``, then the handler calls ``SessionAuth.resolve`` itself to tell the two cases apart, since the
+  (``AccessPolicy.Public``, then the handler calls ``SessionAuth.resolve`` itself to tell the two cases apart, since the
   gate's generic ``401`` wouldn't distinguish "signed out" from "session lookup failed").
 * **An authenticated route whose handler needs data *from* the session** — ``sgrv.be.sheets.UpsertSpreadsheet`` /
-  ``SpreadsheetContent``: default ``auth = true`` for defense in depth, and the handler additionally resolves the
-  session itself (via ``SheetsRoutes.requireRefreshToken``) to reach ``SessionUser.refreshToken``.
-* **A route reachable by password instead of, or in addition to, a session** — ``sgrv.be.debug.Debug``
-  (``adminPwd = true``, combined with ``auth = true`` currently; see `Admin-protected routes`_ for both
-  combinations).
+  ``SpreadsheetContent``: ``AccessPolicy.Authenticated`` resolves the session once, then the handler reads the
+  resulting ``RequestContext.Authenticated`` to reach ``SessionUser.refreshToken``.
+* **A route reachable by password instead of, or in addition to, a session** — ``sgrv.be.debug.Debug`` uses
+  ``AuthenticatedAndAdminPassword``; use ``AdminPassword`` for password-only access.
 * **Calling a *different* Google API on the user's behalf** — ``sgrv.be.sheets.SheetsClient`` is the model:
   a ZIO service trait, a companion of ``ZIO.serviceWithZIO`` accessors, and a ``Live`` case class that
   authenticates a ``zio.http.Client`` call with a Bearer access token from ``GoogleOAuth.accessToken``. To wrap a
   new Google API (Calendar, Gmail, Docs, ...): add its scope(s) to ``GOOGLE_SERVICES``, copy ``SheetsClient``'s
-  shape for that API's REST calls, wire its ``live`` layer into ``BackendEnvironment`` and the ``ZLayer.make``
-  call in ``Main.scala`` next to ``SheetsClient.live``, and add routes modeled on
+  shape for that API's REST calls, wire its ``live`` layer into ``BackendEnvironment``, ``BackendCapabilities``,
+  and the ``ZLayer.make`` call in ``Main.scala`` next to ``SheetsClient.live``, and add a plugin modeled on
   ``backend/src/main/scala/sgrv/be/sheets/Sheets.scala``.
 
 Security warning
@@ -726,7 +727,7 @@ including all environment-variable values and potentially nginx
 configuration. Because OAuth credentials and the admin password are injected
 into the environment, this includes ``GOOGLE_OAUTH_CLIENT_SECRET`` and
 ``ADMIN_PASSWORD`` itself. It is gated by both a signed-in session and the
-``adminPwd`` mechanism described in `Admin-protected routes`_ rather than left
+``AuthenticatedAndAdminPassword`` policy described in `Admin-protected routes`_ rather than left
 open, but that second gate is only as strong as ``admin.pwd``: keep it a
 long, random, secret value, and remember the caveats there about the
 password appearing in a URL.

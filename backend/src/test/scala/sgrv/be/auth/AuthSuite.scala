@@ -1,6 +1,5 @@
 package sgrv.be.auth
 
-import sgrv.be.core.RouteDiscovery
 import zio.{Runtime, Task, Unsafe, ZIO}
 import zio.http.{Path, Method as ZioMethod}
 
@@ -82,7 +81,9 @@ class AuthSuite extends munit.FunSuite:
   test("serialises the signed-in user as escaped JSON"):
     assertEquals(Me.json(SessionUser("a@b.c", "Jane \"JJ\" Doe")), """{"email":"a@b.c","name":"Jane \"JJ\" Doe"}""")
 
-  test("exposes the auth routes through route discovery"):
-    val routeContainer = run(RouteDiscovery.routes)
-    Seq("/auth/login", "/auth/callback", "/me").foreach: path =>
-      assert(routeContainer.routes.exists(_.routePattern.matches(ZioMethod.GET, Path(path))), clues(path))
+  test("auth plugins expose their native typed routes"):
+    Seq(
+      Login.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/auth/login"))),
+      Callback.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/auth/callback"))),
+      Me.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/me")))
+    ).foreach(assert(_))
