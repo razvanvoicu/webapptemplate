@@ -441,6 +441,7 @@ lazy val root = {
         val dockerDir = outputDir / "docker"
         IO.delete(dockerDir)
         IO.createDirectory(dockerDir / "lib")
+        IO.createDirectory(dockerDir / "adc")
         IO.copyFile(appJar, dockerDir / "app.jar")
         runtimeJars.foreach(jar => IO.copyFile(jar, dockerDir / "lib" / jar.getName))
 
@@ -459,7 +460,8 @@ lazy val root = {
           IO.copyFile(source, dockerDir / fileName)
         }
 
-        if (adcFile.isFile) IO.copyFile(adcFile, dockerDir / "application_default_credentials.json")
+        if (adcFile.isFile)
+          IO.copyFile(adcFile, dockerDir / "adc" / "application_default_credentials.json")
         else
           log.warn(
             s"No Application Default Credentials found at ${adcFile.getAbsolutePath}; building the Docker image " +

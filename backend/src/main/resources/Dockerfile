@@ -1,5 +1,5 @@
-# Built by `sbt artifact` from a staging directory containing app.jar, lib/*.jar, prod.env, runApp, and (for
-# local testing outside a GCP platform's own workload identity) application_default_credentials.json.
+# Built by `sbt artifact` from a staging directory containing app.jar, lib/*.jar, prod.env, runApp, and an adc/
+# directory that optionally contains application_default_credentials.json for local testing outside GCP.
 #
 # SECURITY: the resulting image bakes in OAuth/admin secrets (via prod.env) and, if present, a Google Application
 # Default Credentials file. Treat the image itself as a secret-bearing artifact: do not push it to a public
@@ -12,16 +12,17 @@ COPY app.jar ./
 COPY lib/ ./lib/
 COPY prod.env ./
 COPY runApp ./
-COPY application_default_credentials.json /root/.config/gcloud/application_default_credentials.json
+COPY adc/ /root/.config/gcloud/
 
 RUN chmod +x runApp
 
 # A process bound to 127.0.0.1 (this app's default) is unreachable from outside the container regardless of
 # published ports; 0.0.0.0 makes it reachable through Docker's own port mapping.
 ENV BIND_ADDRESS=0.0.0.0
-# Not itself a secret: a filesystem path, matching Google's own well-known ADC location. The actual credential
-# is in the COPY'd file above, already covered by the SECURITY note at the top of this file.
-ENV GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+
+# Do not set GOOGLE_APPLICATION_CREDENTIALS here. If adc/ contains the optional file, Google's libraries find it
+# at their well-known gcloud path. If it does not, Application Default Credentials can continue to workload
+# identity or another provider instead of failing on a forced, nonexistent file path.
 
 EXPOSE 8888
 
