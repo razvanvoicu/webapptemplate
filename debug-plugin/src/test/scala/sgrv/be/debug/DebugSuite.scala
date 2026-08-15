@@ -1,14 +1,26 @@
 package sgrv.be.debug
 
-import zio.{Runtime, UIO, Unsafe}
-import zio.http.Status
+import sgrv.be.core.{CapabilityRegistry, PluginStatus, RouteDiscovery}
+import zio.{Runtime, Task, Unsafe}
+import zio.http.{Method, Path, Status}
 
 class DebugSuite extends munit.FunSuite:
 
-  private def run[A](effect: UIO[A]): A =
+  private def run[A](effect: Task[A]): A =
     Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe.run(effect).getOrThrowFiberFailure()
     }
+
+  test("loads the separately compiled plugin object and exposes its route"):
+    val loaded = run(RouteDiscovery.load(Debug.getClass.getName, getClass.getClassLoader))
+    val discovered = run(RouteDiscovery.discover(CapabilityRegistry.empty, classLoader = getClass.getClassLoader))
+
+    assertEquals(loaded.id, "debug")
+    assert(Debug.routes.routes.exists(_.routePattern.matches(Method.GET, Path("/debug"))))
+    assert(discovered.exists {
+      case PluginStatus.Skipped("debug", _, missing) => missing.exists(_.id == "session-store")
+      case _                                         => false
+    })
 
   test("collects every requested system-signature section"):
     val signature = run(Debug.collect(Seq("9000", "line\nbreak", "slash\\value", "carriage\rreturn", "tab\tvalue")))

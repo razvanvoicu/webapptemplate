@@ -280,8 +280,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
     val statuses = run(RouteDiscovery.discover(sessionRegistry))
 
     assert(statuses.exists {
-      case PluginStatus.Active("debug", _, _) => true
-      case _                                  => false
+      case PluginStatus.Active("test-echo", _, _) => true
+      case _                                      => false
     })
     assert(statuses.exists {
       case PluginStatus.Rejected(className, reason) =>

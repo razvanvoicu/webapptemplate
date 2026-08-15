@@ -1,4 +1,5 @@
 /.bsp/
+/.local/
 target/
 /.idea
 .venv

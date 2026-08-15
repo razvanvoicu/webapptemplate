@@ -32,11 +32,10 @@ Once signed in, a small form appears under the greeting exercising the Google Sh
 to find-or-create that spreadsheet in the signed-in user's Google Drive, append a row recording the request's
 server timestamp and the browser's User-Agent, and display the spreadsheet's current content in a table.
 
-There is no on-page control for the diagnostic ``/debug`` route; see
-`Admin-protected routes`_ below for how to reach it directly. It returns the
-backend's system signature as plain text, reporting operating-system, disk,
-memory, environment, Java runtime, and nginx reverse-proxy information when
-that information is available.
+The separately packaged Debug plugin can add a diagnostic ``/debug`` route; see `Admin-protected routes`_. It
+returns the backend's system signature as plain text, reporting operating-system, disk, memory, environment, Java
+runtime, and nginx reverse-proxy information when available. The plugin is included only when a file under
+``.local/`` configures ``ADMINPASSWORDPATH``; otherwise normal builds ignore it.
 
 The backend owns the static-file routes, but application API routes are not
 coupled to ``Main``. ``RouteDiscovery`` scans the ``sgrv.be`` package on the
@@ -116,7 +115,7 @@ Routes and caching
      - Scala.js source map
      - 5 minutes
    * - ``/debug``
-     - Backend system signature as plain text; requires sign-in and ``?pwd=``
+     - Conditional Debug-plugin route; backend system signature requiring sign-in and ``?pwd=``
      - ``no-store``
    * - ``/auth/login``
      - Redirect to the Google login page
@@ -135,10 +134,10 @@ Routes and caching
      - Default
 
 Each plugin declares an ``AccessPolicy``; see `Adding a backend plugin`_. ``/auth/login``, ``/auth/callback``, and
-``/me`` use ``AccessPolicy.Public`` because they must serve visitors without an existing session. ``/debug`` uses
-``AuthenticatedAndAdminPassword``, so reaching it needs both a session and the admin password
-(`Admin-protected routes`_). The Sheets plugins use ``Authenticated`` and consume the resulting authenticated
-request context to reach the signed-in user's stored Google refresh token
+``/me`` use ``AccessPolicy.Public`` because they must serve visitors without an existing session. When linked,
+the Debug plugin uses ``AuthenticatedAndAdminPassword``, so reaching ``/debug`` needs both a session and the
+admin password (`Admin-protected routes`_). The Sheets plugins use ``Authenticated`` and consume the resulting
+authenticated request context to reach the signed-in user's stored Google refresh token
 (`Google service entitlements (Sheets)`_). Static routes
 (``/``, ``/index.html``, ``/style.css``, ``/main.js``, ``/main.js.map``) are wired directly in ``Main`` and are
 reserved against dynamically loaded route conflicts.
@@ -149,28 +148,25 @@ Login with Google
 OAuth configuration file
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-``oauthConfigFile`` near the top of ``build.sbt`` points at the Google OAuth
-``Web application`` JSON downloaded from Google Cloud, resolved from a shared
-``secretsDir`` whose path depends on the current OS (OneDrive mounts under a
-different root on Windows versus macOS):
+The OAuth configuration is compulsory. Create any regular file directly under the Git-ignored ``.local/``
+directory whose first line is:
 
-.. code-block:: scala
+.. code-block:: text
 
-   val secretsDir = file(if (sys.props("os.name").toLowerCase.contains("mac"))
-     "/Users/<mac-username>/Library/CloudStorage/OneDrive-Personal/code/@secrets/webapptemplate"
-   else
-     "C:/Users/<windows-username>/OneDrive/code/@secrets/webapptemplate")
-   val oauthConfigFile = secretsDir / "oauth.config.json"
+   OAUTHCONFIGPATH=/absolute/path/to/oauth.config.json
 
-Keep this file outside the repository. It must use Google's standard structure
-and contain ``web.client_id`` and ``web.client_secret``. For ``sbt run``, the
-build reads these fields and supplies them to the backend as environment
-variables. For ``sbt artifact``, it appends them only to the ``prod.env`` copy
-staged into the Docker build context; the source ``prod.env`` remains
-secret-free. The resulting Docker image therefore contains a client secret and
-must be handled as a secret-bearing artifact (see `Packaging and deployment`_).
-``adminPasswordFile``, described in `Admin-protected routes`_, resolves from
-the same ``secretsDir``.
+The path may instead be relative to the repository root. Exactly one file must have such a first line. Loading
+the sbt build fails if the pointer is absent or empty, multiple pointers match, or the referenced file does not
+exist. This makes a missing local OAuth configuration fail immediately instead of surfacing later at runtime.
+
+Keep the referenced JSON outside the repository. It must use Google's standard ``Web application`` structure
+and contain ``web.client_id`` and ``web.client_secret``. For ``sbt run``, the build parses these fields into
+``GOOGLE_OAUTH_CLIENT_ID`` and ``GOOGLE_OAUTH_CLIENT_SECRET`` and supplies them alongside the values from
+``test.env`` without modifying that tracked file. For ``sbt artifact``, it appends the same values only to the
+generated ``prod.env`` staged into the Docker build context; the source ``prod.env`` remains secret-free. The
+resulting Docker image therefore contains a client secret and must be handled as a secret-bearing artifact (see
+`Packaging and deployment`_). The optional admin-password pointer uses the same mechanism and is described in
+`Admin-protected routes`_.
 
 The backend reads the OAuth client ID and secret directly from its environment;
 it does not copy them into Firestore. The external JSON is the local source of
@@ -214,10 +210,11 @@ to edit that one file. Which file depends on how the backend is started, so loca
 at different configuration (a test Firestore database and project, say, versus the real one) without editing
 source:
 
-* ``sbt run`` sources ``backend/src/main/resources/test.env`` into the forked local process automatically.
-* ``sbt artifact`` instead reads ``backend/src/main/resources/prod.env``, and both it and the OAuth/admin secrets
-  from `OAuth configuration file`_ / `Admin-protected routes`_ are baked into the ``prod.env`` staged into the
-  Docker build context; the image's ``runApp`` launcher sources that copy at startup.
+* ``sbt run`` sources ``backend/src/main/resources/test.env`` into the forked local process automatically. When
+  Debug is enabled, the build also supplies ``ADMIN_PASSWORD`` to that process without modifying ``test.env``.
+* ``sbt artifact`` instead reads ``backend/src/main/resources/prod.env`` and appends the OAuth secret—and, when
+  Debug is enabled, the admin password—to the generated ``prod.env`` staged in the Docker build context. The
+  source ``prod.env`` remains secret-free; the image's ``runApp`` launcher sources the generated copy at startup.
 
 Either way nothing needs to be set by hand at run time. On startup the backend checks for the Firestore database
 named ``FIRESTORE_DATABASE_ID`` and creates it in Native mode at ``FIRESTORE_LOCATION`` if it does not exist. A
@@ -231,8 +228,8 @@ One-time setup:
    ``http://localhost:8888/auth/callback`` and
    ``https://<service>.run.app/auth/callback``. The callback URI is derived
    from the request's ``Host`` and ``X-Forwarded-Proto`` headers at runtime.
-2. Set ``oauthConfigFile`` in ``build.sbt`` to the downloaded OAuth client JSON.
-   The build injects its values into the local process or deployment artifact.
+2. Point ``OAUTHCONFIGPATH`` in a file under ``.local/`` to the downloaded OAuth client JSON. The build injects
+   its values into the local process or deployment artifact.
 
 Each document in the ``Access`` collection represents one browser session. Its
 document ID is a random 256-bit URL-safe session key, which is also stored in
@@ -348,18 +345,34 @@ variable before the handler runs. A missing or incorrect password produces ``401
 unreadable ``ADMIN_PASSWORD`` produces ``503 Service Unavailable`` (fail closed rather than fall open).
 ``AuthenticatedAndAdminPassword`` composes that check with browser-session authentication.
 
-The ``Debug`` plugin uses ``AccessPolicy.AuthenticatedAndAdminPassword``, so reaching it requires *both* a
-signed-in Google session and the correct password. Sign in first, then visit
+The separately built ``Debug`` plugin uses ``AccessPolicy.AuthenticatedAndAdminPassword``, so reaching it requires
+*both* a signed-in Google session and the correct password. To enable it, create any regular file directly under
+the Git-ignored ``.local/`` directory whose first line is:
+
+.. code-block:: text
+
+   ADMINPASSWORDPATH=/absolute/path/to/admin.pwd
+
+The path may instead be relative to the repository root. Exactly one file may have such a first line; an empty
+path or multiple matches fail the build. The referenced password file must exist and contain a non-empty password.
+
+When configured, ``sbt run`` and backend test tasks add the standalone ``debugPlugin`` JAR to the backend's
+runtime and test classpaths, root ``sbt test`` also runs the plugin's tests, and ``sbt artifact`` copies the JAR
+into the Docker image. The password is supplied as
+``ADMIN_PASSWORD`` alongside the values parsed from ``test.env`` for ``sbt run``, or appended to the generated
+``prod.env`` for ``sbt artifact``; neither tracked env file is modified. Sign in and visit
 ``https://<host>/debug?pwd=<password>`` directly in the browser's address bar; there is intentionally no on-page
 link or button to it. A plugin that an operator should reach without signing in would instead use
 ``AccessPolicy.AdminPassword``.
 
-``adminPasswordFile`` near the top of ``build.sbt`` (``secretsDir / "admin.pwd"``, see `OAuth configuration
-file`_) points at a plain-text file containing a single line with the admin password, kept outside the repository
-beside ``oauth.config.json``. For ``sbt run``, the build reads this file and supplies it to the backend as the
-``ADMIN_PASSWORD`` environment variable. For ``sbt artifact``, it appends ``ADMIN_PASSWORD`` only to the
-``prod.env`` staged into the Docker build context, alongside the OAuth client secret; the source ``prod.env``
-remains secret-free.
+If no matching file exists under ``.local/``, the plugin's JAR is absent from backend classpaths and deployment
+artifacts, root tests skip its suite, and no admin password is read or injected. The project remains available
+for an explicit ``sbt debugPlugin/packageBin`` command.
+
+Debug enablement is evaluated when each relevant task runs, rather than when sbt loads ``build.sbt``. Editing or
+commenting the pointer therefore takes effect on the next ``clean``, ``run``, ``test``, or ``artifact`` command
+in the same sbt session; no ``reload`` is required. Root ``clean`` also cleans the standalone plugin's output so
+an old JAR cannot persist as linked state.
 
 The password travels as a URL query parameter, so treat it like any other bearer credential: it can end up in
 browser history and proxy or server access logs. Rotate ``admin.pwd`` and redeploy if it leaks.
@@ -429,10 +442,12 @@ Run all tests with:
 
    sbt test
 
-``sbt test`` at the root also runs the frontend's Scala.js tests, which need Node.js installed; without it,
-scope the run to the backend with ``sbt "project backend" test``.
+``sbt test`` at the root also runs the frontend's Scala.js tests. When ``ADMINPASSWORDPATH`` is configured under
+``.local/``, it additionally runs the Debug-plugin tests; without that opt-in the root build ignores the plugin.
+The frontend tests need Node.js installed; without it, run ``sbt backend/test`` and, when enabled,
+``sbt debugPlugin/test``.
 
-The backend tests cover server configuration and static assets; nominal plugin discovery; typed intersection
+The backend and Debug-plugin tests cover server configuration and static assets; nominal plugin discovery; typed intersection
 capability resolution; missing-capability skips; access-policy gating; API incompatibility, activation-failure,
 and route-conflict isolation; request-log formatting; debug signature generation; OAuth configuration and URL generation (including
 ``GOOGLE_SERVICES`` parsing and the resulting scope list), user-name fallback, authentication JSON, discovery of
@@ -564,9 +579,10 @@ Build a Docker image with:
    sbt artifact
 
 This performs a clean build, stages a Docker build context under ``backend/target/docker/`` (application JAR, all
-runtime dependency JARs, a generated ``prod.env`` with the OAuth client configuration and the admin password
-baked in, the ``runApp`` launcher, and the ``Dockerfile`` itself), and runs ``docker build`` there (assumed
-already installed). The result is tagged both ``webapptemplate:<version>`` and ``webapptemplate:latest``.
+runtime dependency JARs, a generated ``prod.env`` with the OAuth client configuration, the ``runApp`` launcher,
+and the ``Dockerfile`` itself), and runs ``docker build`` there (assumed already installed). If Debug is enabled,
+its JAR and admin password are included too. The result is tagged both ``webapptemplate:<version>`` and
+``webapptemplate:latest``.
 
 ``dockerPlatform`` near the top of ``build.sbt`` (default ``linux/amd64``) sets the image's target platform
 independently of the machine running the build — e.g. building on Apple Silicon for an amd64 deployment host.
@@ -601,8 +617,8 @@ including for local testing — needs credentials from somewhere, since there's 
 (``~/.config/gcloud/application_default_credentials.json`` on macOS/Linux, generated by
 ``gcloud auth application-default login``) if present, warning and proceeding without it otherwise.
 
-This makes the Docker image itself a secret-bearing artifact, on top of the OAuth/admin secrets already baked
-into its copy of ``prod.env``. Do not push it to a public registry; transfer it directly with
+This makes the Docker image itself a secret-bearing artifact, on top of the OAuth secret and any conditionally
+included admin password baked into its copy of ``prod.env``. Do not push it to a public registry; transfer it directly with
 ``docker save``/``docker load``, or push to a private registry you control. A production deployment on
 Cloud Run/GKE/GCE doesn't need the baked-in credential at all and is arguably better off without it (workload
 identity rotates automatically; a baked-in file doesn't); this mechanism exists for the case of testing the
@@ -619,6 +635,7 @@ Repository layout
    .firebaserc
    project/OAuthBuild.scala
    project/AdminBuild.scala
+   project/LocalConfigBuild.scala
    project/Dependencies.scala
    project/plugins.sbt
    frontend/src/main/scala/sgrv/fe/Main.scala
@@ -628,7 +645,8 @@ Repository layout
    backend/src/main/scala/sgrv/be/auth/
    backend/src/main/scala/sgrv/be/sheets/
    backend/src/main/scala/sgrv/be/core/
-   backend/src/main/scala/sgrv/be/debug/
+   debug-plugin/src/main/scala/sgrv/be/debug/
+   debug-plugin/src/test/scala/sgrv/be/debug/
    backend/src/main/resources/prod.env
    backend/src/main/resources/test.env
    backend/src/main/resources/Dockerfile
@@ -655,15 +673,11 @@ What absolutely needs changing
    corresponding API isn't turned on for the project even though the OAuth scope was granted.
 
 2. **A new OAuth 2.0 web client**, created in that project, with your own callback URIs registered (step 1 under
-   `Login with Google`_'s one-time setup). Download its JSON as your fork's ``oauth.config.json`` — the one in
-   this repository's secrets folder is for a specific existing GCP project and will not work for a fork.
+   `Login with Google`_'s one-time setup). Download its JSON as your fork's ``oauth.config.json``, keep it outside
+   source control, and point to it with an ``OAUTHCONFIGPATH=...`` first line in a file under ``.local/``. The
+   build is intentionally unusable until that compulsory pointer exists.
 
-3. **``secretsDir`` in ``build.sbt``**. The Windows/macOS paths there point at this repository's original
-   author's OneDrive folder; point them at wherever *you* keep secrets outside your fork's repository (OneDrive,
-   another cloud-synced folder, or a plain local directory — the mechanism is just two ``File`` paths, not
-   OneDrive-specific).
-
-4. **``backend/src/main/resources/prod.env`` and ``test.env``** — the same three settings in both (see
+3. **``backend/src/main/resources/prod.env`` and ``test.env``** — the same three settings in both (see
    `Login with Google`_ for how the two files are used differently by ``sbt run`` versus ``sbt artifact``; a
    fork can safely point them at different GCP projects, e.g. a real one and a test one):
 
@@ -674,10 +688,11 @@ What absolutely needs changing
    * ``PORT`` can stay as-is; it is only a local-run default and is overridden by the ``PORT`` a platform like
      Cloud Run injects.
 
-5. **A fresh ``admin.pwd``** — a new random password, if you keep any admin-password-protected plugins (see
-   "What to keep, drop, or extend" below).
+4. **Optional Debug configuration** — if you keep the Debug plugin, create a fresh random password file outside
+   source control and point to it with an ``ADMINPASSWORDPATH=...`` first line in a file under ``.local/`` (see
+   `Admin-protected routes`_). Omit that local configuration to leave Debug out of normal builds.
 
-6. **Application Default Credentials for the new project** (`Login with Google`_): locally,
+5. **Application Default Credentials for the new project** (`Login with Google`_): locally,
    ``gcloud auth application-default login --impersonate-service-account=<new-project's-Firestore-service-account>``;
    in deployment, run the service under that same service account.
 
@@ -698,9 +713,9 @@ What to keep, drop, or extend
 
 Treat ``backend/src/main/scala/sgrv/be/auth/`` and ``.../core/`` as infrastructure: the OAuth flow, session
 store, and route discovery/gating work as-is and shouldn't need edits unless you're changing how authentication
-itself works. ``sgrv.be.debug.Debug`` and the entire ``sgrv.be.sheets`` package, by contrast, are worked
-*examples* — delete either (and its frontend UI, and its ``GOOGLE_SERVICES`` scopes if dropping Sheets) if your
-project has no use for them, or use them as the template for your own routes.
+itself works. The standalone ``debugPlugin`` project and the entire ``sgrv.be.sheets`` package, by contrast, are
+worked *examples* — delete either (and its frontend UI and ``GOOGLE_SERVICES`` scopes if dropping Sheets) if your
+project has no use for them, or use them as templates for your own plugins.
 
 `Adding a backend plugin`_ above is the generic recipe for a new route; the routes already in the repository are
 worked examples of the shapes a new route is likely to take:
@@ -718,8 +733,8 @@ worked examples of the shapes a new route is likely to take:
 * **An authenticated route whose handler needs data *from* the session** — ``sgrv.be.sheets.UpsertSpreadsheet`` /
   ``SpreadsheetContent``: ``AccessPolicy.Authenticated`` resolves the session once, then the handler reads the
   resulting ``RequestContext.Authenticated`` to reach ``SessionUser.refreshToken``.
-* **A route reachable by password instead of, or in addition to, a session** — ``sgrv.be.debug.Debug`` uses
-  ``AuthenticatedAndAdminPassword``; use ``AdminPassword`` for password-only access.
+* **A route reachable by password instead of, or in addition to, a session** — the separately packaged
+  ``sgrv.be.debug.Debug`` plugin uses ``AuthenticatedAndAdminPassword``; use ``AdminPassword`` for password-only access.
 * **Calling a *different* Google API on the user's behalf** — ``sgrv.be.sheets.SheetsClient`` is the model: a
   plugin-private adapter constructed from the host's generic ``zio.http.Client`` capability, authenticating calls
   with a Bearer access token from ``GoogleOAuth.accessToken``. To wrap a new Google API (Calendar, Gmail, Docs,
@@ -730,7 +745,7 @@ worked examples of the shapes a new route is likely to take:
 Security warning
 ----------------
 
-The ``/debug`` route intentionally exposes sensitive diagnostic data,
+When its standalone plugin JAR is linked, the ``/debug`` route intentionally exposes sensitive diagnostic data,
 including all environment-variable values and potentially nginx
 configuration. Because OAuth credentials and the admin password are injected
 into the environment, this includes ``GOOGLE_OAUTH_CLIENT_SECRET`` and

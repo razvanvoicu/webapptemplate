@@ -20,7 +20,10 @@ object OAuthBuild {
 
   def configEnv(file: File): Map[String, String] = {
     if (!file.isFile)
-      sys.error(s"OAuth configuration file does not exist: ${file.getAbsolutePath}. Set oauthConfigFile in build.sbt.")
+      sys.error(
+        s"OAuth configuration file does not exist: ${file.getAbsolutePath}. " +
+          "Set OAUTHCONFIGPATH in a file under .local."
+      )
 
     val json = IO.read(file)
     def requiredJsonString(field: String): String = {

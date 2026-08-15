@@ -12,6 +12,11 @@ import scala.jdk.CollectionConverters.*
 import zio.{IO, Task, UIO, ZIO}
 import zio.http.{Header, Method, Response, Routes, handler}
 
+/** Sensitive diagnostics supplied as an independently packaged backend plugin.
+ *  This allows the inspection of a prospective production environment in the cloud,
+ *  revealing how the cloud provider has set up that environment (e.g. AppEngine, Lambda).
+ *  This plugin can be linked in conditionally, based on build-time configuration.
+ *  CAUTION: This plugin should never be part of a _real_ production environment. */
 object Debug extends BackendPlugin:
   type Requires = SessionStore
 

@@ -1,21 +1,18 @@
 import Dependencies._
 import org.scalajs.linker.interface.ModuleKind
 
-// TEMPLATE SETTING: the OneDrive-synced folder holding this deployment's secrets, outside the repository. Its
-// path is OS-dependent because OneDrive mounts under a different root on each platform.
-val secretsDir = file(
-  if (sys.props("os.name").toLowerCase.contains("mac"))
-    "/Users/raz/Library/CloudStorage/OneDrive-Personal/code/@secrets/webapptemplate"
-  else
-    "C:/Users/razva/OneDrive/code/@secrets/webapptemplate"
-)
+// Local pointer files keep machine-specific secret locations outside source control. OAuth configuration is
+// compulsory; Debug remains opt-in. Each pointer must be the first line of exactly one regular file directly
+// under .local. Relative target paths are resolved from the repository root.
+val repositoryDir          = file(".").getCanonicalFile
+val localConfigDir         = repositoryDir / ".local"
+val oauthConfigPathPrefix  = "OAUTHCONFIGPATH="
+val adminPasswordPathPrefix = "ADMINPASSWORDPATH="
 
 // The Google OAuth "Web application" JSON downloaded from Google Cloud; must contain web.client_id and
-// web.client_secret.
-val oauthConfigFile = secretsDir / "oauth.config.json"
-
-// A single-line plain-text password gating routes declared `@Route(adminPwd = true)`, e.g. /debug.
-val adminPasswordFile = secretsDir / "admin.pwd"
+// web.client_secret. Merely loading the build fails if its compulsory .local pointer or target file is absent.
+val oauthConfigFile: File =
+  LocalConfigBuild.requiredPath(localConfigDir, oauthConfigPathPrefix, repositoryDir)
 
 // gcloud's own well-known Application Default Credentials location, baked into the Docker image (only) so
 // `docker run` can reach Firestore/Sheets outside a GCP platform's own workload identity. Generate it with
@@ -62,6 +59,12 @@ lazy val testAuthenticated = taskKey[Unit](
 )
 
 lazy val readmeToHtml = taskKey[Unit]("Render README.rst to target/README.html via docutils")
+lazy val localAdminPasswordFile = taskKey[Option[File]](
+  "Resolve the optional ADMINPASSWORDPATH pointer from the current contents of .local"
+)
+lazy val optionalDebugPluginJar = taskKey[Option[File]](
+  "Build the Debug plugin JAR when ADMINPASSWORDPATH is configured under .local"
+)
 
 addCommandAlias("artifact", "deploymentArtifact")
 
@@ -140,8 +143,28 @@ lazy val backend = (project in file("backend"))
     // Some networks hand out AAAA (IPv6) records for googleapis.com without actually routing IPv6, which makes
     // outbound Sheets/Drive calls fail with NoRouteToHostException; prefer IPv4 to avoid that.
     run / javaOptions += "-Djava.net.preferIPv4Stack=true",
+    localAdminPasswordFile :=
+      LocalConfigBuild.optionalPath(localConfigDir, adminPasswordPathPrefix, repositoryDir),
     run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "test.env") ++
-      OAuthBuild.configEnv(oauthConfigFile) ++ AdminBuild.configEnv(adminPasswordFile)
+      OAuthBuild.configEnv(oauthConfigFile) ++
+      localAdminPasswordFile.value.fold(Map.empty[String, String])(AdminBuild.configEnv),
+    optionalDebugPluginJar := Def.taskDyn {
+      if (localAdminPasswordFile.value.nonEmpty)
+        Def.task[Option[File]](Some((LocalProject("debugPlugin") / Compile / packageBin).value))
+      else Def.task[Option[File]](None)
+    }.value,
+    Runtime / unmanagedClasspath ++= optionalDebugPluginJar.value.toSeq.map(Attributed.blank),
+    Test / unmanagedClasspath ++= optionalDebugPluginJar.value.toSeq.map(Attributed.blank)
+  )
+
+/** Optional diagnostic plugin. It compiles against the backend SPI and produces a separate JAR. Runtime and
+  * test tasks add it to backend classpaths only when the current .local contents configure ADMINPASSWORDPATH.
+  */
+lazy val debugPlugin = (project in file("debug-plugin"))
+  .dependsOn(backend % "provided->compile")
+  .settings(
+    name := "webapptemplate-debug-plugin",
+    libraryDependencies += munit % Test
   )
 
 // End-to-end Selenium suite. Its `test` task doesn't just run tests: it first checks Chrome/Selenium are
@@ -348,14 +371,34 @@ lazy val e2etest = (project in file("e2etest"))
     }.value
   )
 
-lazy val root = (project in file("."))
-  .aggregate(frontend, backend)
-  .settings(
+lazy val root = {
+  Project(id = "root", base = file(".")).aggregate(frontend, backend).settings(
     name            := "webapptemplate",
     coverageEnabled := false,
     publish / skip  := true,
     run / aggregate := false,
     Compile / run   := (backend / Compile / run).evaluated,
+    Test / test / aggregate := false,
+    Test / test := Def.taskDyn {
+      if ((backend / localAdminPasswordFile).value.nonEmpty)
+        Def.task {
+          (frontend / Test / test).value
+          (backend / Test / test).value
+          (debugPlugin / Test / test).value
+        }
+      else
+        Def.task {
+          (frontend / Test / test).value
+          (backend / Test / test).value
+        }
+    }.value,
+    clean / aggregate := false,
+    clean := {
+      (frontend / clean).value
+      (backend / clean).value
+      (debugPlugin / clean).value
+      IO.delete((Compile / target).value)
+    },
     readmeToHtml := {
       val log       = streams.value.log
       val repoRoot  = (ThisBuild / baseDirectory).value
@@ -376,7 +419,10 @@ lazy val root = (project in file("."))
       Def.task {
         val log         = streams.value.log
         val appJar      = (backend / Compile / packageBin).value
-        val runtimeJars = (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile)
+        val debugJars    = (backend / optionalDebugPluginJar).value.toSeq
+        val runtimeJars = (
+          (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile) ++ debugJars
+        ).distinct
         val resources   = (backend / Compile / resourceDirectory).value
         val outputDir   = (backend / Compile / target).value
 
@@ -386,7 +432,8 @@ lazy val root = (project in file("."))
         if (duplicateJarNames.nonEmpty)
           sys.error(s"Runtime dependency filename collision: ${duplicateJarNames.mkString(", ")}")
 
-        val secretEnv = OAuthBuild.configEnv(oauthConfigFile) ++ AdminBuild.configEnv(adminPasswordFile)
+        val secretEnv = OAuthBuild.configEnv(oauthConfigFile) ++
+          (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv)
 
         // Stage the Docker build context: app.jar, lib/*.jar, a secret-bearing prod.env, runApp (the image's
         // entrypoint), the Dockerfile itself, and (if available) local ADC for testing outside a GCP platform's
@@ -434,3 +481,4 @@ lazy val root = (project in file("."))
       }
     }.value
   )
+}

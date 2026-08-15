@@ -4,7 +4,10 @@ import sbt.IO
 object AdminBuild {
   def configEnv(file: File): Map[String, String] = {
     if (!file.isFile)
-      sys.error(s"Admin password file does not exist: ${file.getAbsolutePath}. Set adminPasswordFile in build.sbt.")
+      sys.error(
+        s"Admin password file does not exist: ${file.getAbsolutePath}. " +
+          "Set ADMINPASSWORDPATH in a file under .local."
+      )
 
     val password = IO.read(file).trim
     if (password.isEmpty)
