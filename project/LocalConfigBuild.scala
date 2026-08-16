@@ -30,15 +30,16 @@ object LocalConfigBuild {
       .filter(_.isFile)
       .sortBy(_.getName)
       .flatMap { configFile =>
-        IO.readLines(configFile).headOption
+        IO.readLines(configFile)
+          .headOption
           .filter(_.startsWith(prefix))
           .map(line => configFile -> line.drop(prefix.length))
       }
 
     matches match {
-      case Seq() => None
+      case Seq()                                      => None
       case Seq((configFile, value)) if value.nonEmpty => Some(configFile -> value)
-      case Seq((configFile, _)) =>
+      case Seq((configFile, _))                       =>
         sys.error(s"${configFile.getAbsolutePath} has an empty $prefix value.")
       case several =>
         sys.error(

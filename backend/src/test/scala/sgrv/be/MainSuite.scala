@@ -16,11 +16,31 @@ class MainSuite extends munit.FunSuite:
     assertEquals(address.getAddress.getHostAddress, "0.0.0.0")
     assertEquals(address.getPort, 9000)
 
-  test("selects the port from arguments, environment, or the default"):
-    assertEquals(Main.port(Chunk("9000"), Some("7000")), 9000)
-    assertEquals(Main.port(Chunk.empty, Some("7000")), 7000)
-    assertEquals(Main.port(Chunk("invalid"), Some("7000")), 8888)
-    assertEquals(Main.port(Chunk.empty, None), 8888)
+  test("selects a valid port from arguments, environment, or the default"):
+    assertEquals(Main.port(Chunk("9000"), Some("7000")), Right(9000))
+    assertEquals(Main.port(Chunk.empty, Some("7000")), Right(7000))
+    assertEquals(Main.port(Chunk.empty, None), Right(8888))
+
+  test("rejects an invalid port from the source that wins precedence"):
+    val argumentError = Main.port(Chunk("invalid"), Some("7000")).swap.toOption.get
+    val environmentError = Main.port(Chunk.empty, Some("70000")).swap.toOption.get
+
+    assertEquals(
+      argumentError.getMessage,
+      "Invalid port configuration from the first command-line argument: 'invalid'. " +
+        "Expected an integer from 1 to 65535."
+    )
+    assertEquals(
+      environmentError.getMessage,
+      "Invalid port configuration from PORT: '70000'. Expected an integer from 1 to 65535."
+    )
+
+  test("accepts only ports in the TCP range"):
+    assert(Main.port(Chunk("1"), None).isRight)
+    assert(Main.port(Chunk("65535"), None).isRight)
+    assert(Main.port(Chunk("0"), None).isLeft)
+    assert(Main.port(Chunk("-1"), None).isLeft)
+    assert(Main.port(Chunk("65536"), None).isLeft)
 
   test("selects the bind address from the environment, defaulting to IPv4 loopback"):
     assertEquals(Main.bindAddress(Some("0.0.0.0")), "0.0.0.0")
@@ -41,7 +61,7 @@ class MainSuite extends munit.FunSuite:
     assertEquals(LoggerConfig.requestSummary(Map.empty), None)
 
   test("loads packaged assets and returns not found for a missing asset"):
-    val index   = run(Main.asset("index.html", MediaType.text.html))
+    val index = run(Main.asset("index.html", MediaType.text.html))
     val content = run(index.body.asString)
     val missing = run(Main.asset("missing.txt", MediaType.text.plain))
 
@@ -51,11 +71,11 @@ class MainSuite extends munit.FunSuite:
     assertEquals(missing.status, Status.NotFound)
 
   test("serves a static asset through the application routes"):
-    val routes   = run(ZIO.succeed(Main.staticRoutes))
-    val request  = Request.get(URL.decode("/style.css").toOption.get)
+    val routes = run(ZIO.succeed(Main.staticRoutes))
+    val request = Request.get(URL.decode("/style.css").toOption.get)
     val response = run(zio.ZIO.scoped(routes.runZIO(request)))
-    val content  = run(response.body.asString)
-    val index    = run(zio.ZIO.scoped(routes.runZIO(Request.get(URL.decode("/").toOption.get))))
+    val content = run(response.body.asString)
+    val index = run(zio.ZIO.scoped(routes.runZIO(Request.get(URL.decode("/").toOption.get))))
 
     assertEquals(response.status, Status.Ok)
     assertEquals(response.headers.get(Header.CacheControl), Some(Header.CacheControl.MaxAge(300)))

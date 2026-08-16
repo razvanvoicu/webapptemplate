@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.security.MessageDigest
 import sgrv.be.BackendCapabilities
 import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
-import zio.{durationInt, Clock, Duration, IO, UIO, ZIO}
+import zio.{durationInt, Clock, Duration, IO, ZIO}
 import zio.http.{Cookie, Method, Path, Request, Response, Routes, Status, URL, handler}
 
 /** Completes the Google login and creates an opaque browser session in Firestore. */
@@ -21,20 +21,26 @@ object Callback extends BackendPlugin:
     Routes(Method.GET / "auth" / "callback" -> handler((request: Request) => apply(request)))
 
   private[auth] val sessionCookieName = "session"
-  private val sessionLifetime         = 7.days
+  private val sessionLifetime = 7.days
 
   private def apply(request: Request): ZIO[Requires, Nothing, Response] =
     val login =
       for
         _ <- checkState(request)
-        code <- ZIO.fromOption(request.queryParam("code").filter(_.nonEmpty)).orElseFail(new IllegalArgumentException(
-            request.queryParam("error").fold("The callback carries no authorization code")(e => s"Google reported: $e")
-          ))
+        code <- ZIO
+          .fromOption(request.queryParam("code").filter(_.nonEmpty))
+          .orElseFail(
+            new IllegalArgumentException(
+              request
+                .queryParam("error")
+                .fold("The callback carries no authorization code")(e => s"Google reported: $e")
+            )
+          )
         authentication <- GoogleOAuth.authenticate(code)
         now <- Clock.instant
         expiry = now.plus(sessionLifetime)
         sessionKey <- TokenGenerator.generate(32)
-        _ <- SessionStore.create(sessionKey, authentication.user, now, expiry, authentication.refreshToken)
+        _ <- SessionStore.create(sessionKey, authentication.user, now, expiry)
         _ <- ZIO.logInfo(s"Created browser session for ${authentication.user.email}")
         secure <- GoogleOAuth.callbackIsSecure
         cookie = sessionCookie(sessionKey, secure)
@@ -43,11 +49,12 @@ object Callback extends BackendPlugin:
       ZIO.logWarning(s"Google login failed: ${error.getMessage}") *>
         ZIO.succeed(Response.text("Login failed. Return to the home page and try again.").status(Status.Unauthorized))
 
-  /**
-    * Checks that the state parameter in the request matches the login cookie.
+  /** Checks that the state parameter in the request matches the login cookie.
     *
-    * @param request An HTTP request
-    * @return Unit
+    * @param request
+    *   An HTTP request
+    * @return
+    *   Unit
     */
   private def checkState(request: Request): IO[IllegalArgumentException, Unit] =
     val provided = request.queryParam("state").getOrElse("")
@@ -57,12 +64,14 @@ object Callback extends BackendPlugin:
     then ZIO.unit
     else ZIO.fail(new IllegalArgumentException("The state parameter does not match the login cookie"))
 
-  /**
-    * Creates an HTTP cookie that stores the session token.
+  /** Creates an HTTP cookie that stores the session token.
     *
-    * @param token   The session token
-    * @param secure  Whether the cookie should be marked as secure
-    * @return An HTTP cookie
+    * @param token
+    *   The session token
+    * @param secure
+    *   Whether the cookie should be marked as secure
+    * @return
+    *   An HTTP cookie
     */
   private def sessionCookie(token: String, secure: Boolean): Cookie.Response =
     Cookie.Response(
@@ -75,11 +84,12 @@ object Callback extends BackendPlugin:
       sameSite = Option(Cookie.SameSite.Lax)
     )
 
-  /**
-    * Creates an HTTP cookie that clears the login state cookie.
+  /** Creates an HTTP cookie that clears the login state cookie.
     *
-    * @param secure  Whether the cookie should be marked as secure
-    * @return An HTTP cookie
+    * @param secure
+    *   Whether the cookie should be marked as secure
+    * @return
+    *   An HTTP cookie
     */
   private def clearedStateCookie(secure: Boolean): Cookie.Response =
     Cookie.Response(

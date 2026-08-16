@@ -33,7 +33,7 @@ private[sheets] object SheetsError:
   ) extends SheetsError:
     override val diagnostic: String =
       val status = statusCode.fold("")(value => s" (HTTP $value)")
-      val body   = responseBody.filter(_.nonEmpty).fold("")(value => s": $value")
+      val body = responseBody.filter(_.nonEmpty).fold("")(value => s": $value")
       s"Unexpected Google response during $operation$status$body"
 
   def fromAccessTokenFailure(error: Throwable): SheetsError =

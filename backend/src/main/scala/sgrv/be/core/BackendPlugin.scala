@@ -27,23 +27,29 @@ object AccessPolicy:
 
   case object AdminPassword extends AccessPolicy[Any]:
     override def authorize(request: Request): ZIO[Any, Nothing, Either[Response, RequestContext]] =
-      AdminAuth.reject(request).map:
-        case Some(response) => Left(response)
-        case None           => Right(RequestContext.Public(request))
+      AdminAuth
+        .reject(request)
+        .map:
+          case Some(response) => Left(response)
+          case None           => Right(RequestContext.Public(request))
 
   case object AuthenticatedAndAdminPassword extends AccessPolicy[SessionStore]:
     override def authorize(request: Request): ZIO[SessionStore, Nothing, Either[Response, RequestContext]] =
-      SessionAuth.resolve(request).flatMap:
-        case Left(response) => ZIO.succeed(Left(response))
-        case Right(user) =>
-          AdminAuth.reject(request).map:
-            case Some(response) => Left(response)
-            case None           => Right(RequestContext.Authenticated(request, user))
+      SessionAuth
+        .resolve(request)
+        .flatMap:
+          case Left(response) => ZIO.succeed(Left(response))
+          case Right(user)    =>
+            AdminAuth
+              .reject(request)
+              .map:
+                case Some(response) => Left(response)
+                case None           => Right(RequestContext.Authenticated(request, user))
 
 /** Nominal contract implemented by independently discoverable backend components.
   *
-  * The abstract type member keeps a loaded plugin's runtime capability declaration tied to the environment of
-  * its routes, even after discovery has erased the plugin's concrete class.
+  * The abstract type member keeps a loaded plugin's runtime capability declaration tied to the environment of its
+  * routes, even after discovery has erased the plugin's concrete class.
   */
 trait BackendPlugin:
   type Requires

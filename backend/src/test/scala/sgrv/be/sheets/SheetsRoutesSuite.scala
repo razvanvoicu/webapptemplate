@@ -1,7 +1,9 @@
 package sgrv.be.sheets
 
+import sgrv.api.{SpreadsheetContentResponse, UpsertSpreadsheetResponse}
 import zio.{Runtime, Task, Unsafe}
 import zio.http.Status
+import zio.json.*
 
 class SheetsRoutesSuite extends munit.FunSuite:
 
@@ -10,33 +12,37 @@ class SheetsRoutesSuite extends munit.FunSuite:
       Runtime.default.unsafe.run(effect).getOrThrowFiberFailure()
     }
 
-  test("extracts the name field from a JSON request body"):
-    assertEquals(SheetsRoutes.extractName("""{"name":"My Sheet"}"""), Some("My Sheet"))
+  test("decodes and validates the upsert request with standard JSON escapes"):
+    assertEquals(SheetsRoutes.decodeName("""{"name":"My Sheet"}"""), Right("My Sheet"))
     assertEquals(
-      SheetsRoutes.extractName("""{"name":"Quote \" and backslash \\"}"""),
-      Some("Quote \" and backslash \\")
+      SheetsRoutes.decodeName("""{"name":"Line\nUnicode \u0041 and quote \""}"""),
+      Right("Line\nUnicode A and quote \"")
     )
-    assertEquals(SheetsRoutes.extractName("""{"name":"  "}"""), None)
-    assertEquals(SheetsRoutes.extractName("{}"), None)
-    assertEquals(SheetsRoutes.extractName("not json"), None)
+    assert(SheetsRoutes.decodeName("""{"name":"  "}""").isLeft)
+    assert(SheetsRoutes.decodeName("{}").isLeft)
+    assert(SheetsRoutes.decodeName("\"name\":\"accepted by the old regex\"").isLeft)
+    assert(SheetsRoutes.decodeName("""{"name":"Sheet","unexpected":true}""").isLeft)
+    assert(SheetsRoutes.decodeName("""{"name":"trailing comma",}""").isLeft)
+    assert(SheetsRoutes.decodeName("not json").isLeft)
 
-  test("renders spreadsheet rows as escaped JSON"):
-    assertEquals(SheetsRoutes.rowsJson(Seq.empty), """{"rows":[]}""")
+  test("encodes spreadsheet responses with the shared JSON codecs"):
+    assertEquals(SpreadsheetContentResponse(Seq.empty).toJson, """{"rows":[]}""")
     assertEquals(
-      SheetsRoutes.rowsJson(Seq(Seq("2026-08-08T00:00:00Z", "Mozilla/5.0 \"test\""))),
+      SpreadsheetContentResponse(Seq(Seq("2026-08-08T00:00:00Z", "Mozilla/5.0 \"test\""))).toJson,
       """{"rows":[["2026-08-08T00:00:00Z","Mozilla/5.0 \"test\""]]}"""
     )
     assertEquals(
-      SheetsRoutes.rowsJson(Seq(Seq("a", "b"), Seq("c", "d"))),
+      SpreadsheetContentResponse(Seq(Seq("a", "b"), Seq("c", "d"))).toJson,
       """{"rows":[["a","b"],["c","d"]]}"""
     )
+    assertEquals(UpsertSpreadsheetResponse("sheet-123").toJson, """{"spreadsheetId":"sheet-123"}""")
 
   test("classifies unsuccessful Google responses as domain errors"):
     val unauthorized = SheetsClient.unsuccessfulResponse("reading a sheet", 401, "invalid token")
-    val forbidden    = SheetsClient.unsuccessfulResponse("reading a sheet", 403, "missing scope")
-    val rateLimited  = SheetsClient.unsuccessfulResponse("reading a sheet", 429, "slow down")
-    val unavailable  = SheetsClient.unsuccessfulResponse("reading a sheet", 503, "backend down")
-    val unexpected   = SheetsClient.unsuccessfulResponse("reading a sheet", 400, "bad request")
+    val forbidden = SheetsClient.unsuccessfulResponse("reading a sheet", 403, "missing scope")
+    val rateLimited = SheetsClient.unsuccessfulResponse("reading a sheet", 429, "slow down")
+    val unavailable = SheetsClient.unsuccessfulResponse("reading a sheet", 503, "backend down")
+    val unexpected = SheetsClient.unsuccessfulResponse("reading a sheet", 400, "bad request")
 
     assert(unauthorized.isInstanceOf[SheetsError.Unauthenticated])
     assert(forbidden.isInstanceOf[SheetsError.Unauthenticated])
@@ -52,7 +58,7 @@ class SheetsRoutesSuite extends munit.FunSuite:
       Some(upstreamBody)
     )
     val response = SheetsRoutes.responseFor(error)
-    val body     = run(response.body.asString)
+    val body = run(response.body.asString)
 
     assertEquals(response.status, Status.BadGateway)
     assertEquals(body, "Google returned an unexpected response.")
@@ -72,9 +78,9 @@ class SheetsRoutesSuite extends munit.FunSuite:
     )
 
     cases.foreach { entry =>
-      val error          = entry._1
+      val error = entry._1
       val expectedStatus = entry._2._1
-      val expectedBody   = entry._2._2
+      val expectedBody = entry._2._2
       val response = SheetsRoutes.responseFor(error)
       assertEquals(response.status, expectedStatus)
       assertEquals(run(response.body.asString), expectedBody)

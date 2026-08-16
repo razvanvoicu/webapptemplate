@@ -3,9 +3,9 @@ package sgrv.e2e
 import org.openqa.selenium.By
 import org.openqa.selenium.chrome.{ChromeDriver, ChromeOptions}
 
-/** Exercises the real, running backend (started by the e2etest orchestration in build.sbt) through an actual
-  * Chrome instance. The base URL matches `test.env`'s default `PORT`; override with `-De2e.baseUrl=...` if
-  * that's ever not the case.
+/** Exercises the real, running backend (started by the e2etest orchestration in build.sbt) through an actual Chrome
+  * instance. The base URL matches `test.env`'s default `PORT`; override with `-De2e.baseUrl=...` if that's ever not the
+  * case.
   */
 class HomePageE2ESuite extends munit.FunSuite:
   private val baseUrl = sys.props.getOrElse("e2e.baseUrl", "http://127.0.0.1:8888")

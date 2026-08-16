@@ -25,13 +25,13 @@ object CapabilityRegistry:
 
 /** A runtime-resolvable description of the environment required by a plugin.
   *
-  * The type parameter is preserved through composition: combining requirements for `A` and `B` yields a
-  * requirement for `A & B` and resolving it yields a correspondingly typed [[ZEnvironment]].
+  * The type parameter is preserved through composition: combining requirements for `A` and `B` yields a requirement for
+  * `A & B` and resolving it yields a correspondingly typed [[ZEnvironment]].
   */
 sealed trait CapabilitySet[R]:
   self =>
-    private[core] def resolve(registry: CapabilityRegistry): Either[Chunk[MissingCapability], ZEnvironment[R]]
-    final def ++[R2](that: CapabilitySet[R2]): CapabilitySet[R & R2] = CapabilitySet.Both(self, that)
+  private[core] def resolve(registry: CapabilityRegistry): Either[Chunk[MissingCapability], ZEnvironment[R]]
+  final def ++[R2](that: CapabilitySet[R2]): CapabilitySet[R & R2] = CapabilitySet.Both(self, that)
 
 object CapabilitySet:
   val empty: CapabilitySet[Any] = Empty
@@ -52,6 +52,6 @@ object CapabilitySet:
     override def resolve(registry: CapabilityRegistry): Either[Chunk[MissingCapability], ZEnvironment[A & B]] =
       (left.resolve(registry), right.resolve(registry)) match
         case (Right(leftEnvironment), Right(rightEnvironment)) => Right(leftEnvironment.unionAll(rightEnvironment))
-        case (Left(leftMissing), Left(rightMissing)) => Left(leftMissing ++ rightMissing)
-        case (Left(missing), _) => Left(missing)
-        case (_, Left(missing)) => Left(missing)
+        case (Left(leftMissing), Left(rightMissing))           => Left(leftMissing ++ rightMissing)
+        case (Left(missing), _)                                => Left(missing)
+        case (_, Left(missing))                                => Left(missing)

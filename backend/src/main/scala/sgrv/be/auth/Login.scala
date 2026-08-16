@@ -17,27 +17,29 @@ object Login extends BackendPlugin:
     Routes(Method.GET / "auth" / "login" -> handler((_: Request) => apply))
 
   private[auth] val stateCookieName = "auth_state"
-  private[auth] val cookiePath      = Path.root / "auth"
+  private[auth] val cookiePath = Path.root / "auth"
 
   private def apply: ZIO[Requires, Nothing, Response] =
     val redirect =
       for
-        state          <- TokenGenerator.generate(32)
-        target         <- GoogleOAuth.authorizationUrl(state)
+        state <- TokenGenerator.generate(32)
+        target <- GoogleOAuth.authorizationUrl(state)
         callbackSecure <- GoogleOAuth.callbackIsSecure
-        url            <- ZIO.fromEither(URL.decode(target))
+        url <- ZIO.fromEither(URL.decode(target))
       yield Response
         .redirect(url)
         .addCookie(stateCookie(state, secure = callbackSecure))
     redirect.catchAll: error =>
       ZIO.logWarning(s"Google login could not start: ${error.getMessage}") *>
         ZIO.succeed(Response.text("Login is currently unavailable.").status(Status.ServiceUnavailable))
-  /**
-    * Generate the cookie that links the Google Auth login call to the ensuing callback. Upon receiving
-    * this cookie the backend can be sure that it responds to a login attempt from the same session.
+
+  /** Generate the cookie that links the Google Auth login call to the ensuing callback. Upon receiving this cookie the
+    * backend can be sure that it responds to a login attempt from the same session.
     *
-    * @param state Generated random key to be verified by the callback
-    * @param secure Usually 'true'
+    * @param state
+    *   Generated random key to be verified by the callback
+    * @param secure
+    *   Usually 'true'
     * @return
     */
   private def stateCookie(state: String, secure: Boolean): Cookie.Response =

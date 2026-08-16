@@ -44,7 +44,7 @@ class DebugSuite extends munit.FunSuite:
 
   test("serves the signature response"):
     val response = run(Debug.response)
-    val content  = run(response.body.asString.orDie)
+    val content = run(response.body.asString.orDie)
 
     assertEquals(response.status, Status.Ok)
     assert(content.contains("=== Operating system ==="))

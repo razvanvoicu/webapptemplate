@@ -13,11 +13,11 @@ import sgrv.be.BackendCapabilities
 import sgrv.be.auth.SessionStore
 import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 
-/** Sensitive diagnostics supplied as an independently packaged backend plugin.
- *  This allows the inspection of a prospective production environment in the cloud,
- *  revealing how the cloud provider has set up that environment (e.g. AppEngine, Lambda).
- *  This plugin can be linked in conditionally, based on build-time configuration.
- *  CAUTION: This plugin should never be part of a _real_ production environment. */
+/** Sensitive diagnostics supplied as an independently packaged backend plugin. This allows the inspection of a
+  * prospective production environment in the cloud, revealing how the cloud provider has set up that environment (e.g.
+  * AppEngine, Lambda). This plugin can be linked in conditionally, based on build-time configuration. CAUTION: This
+  * plugin should never be part of a _real_ production environment.
+  */
 object Debug extends BackendPlugin:
   type Requires = SessionStore
 
@@ -28,7 +28,7 @@ object Debug extends BackendPlugin:
     Routes(Method.GET / "debug" -> handler(response))
 
   private[debug] def response: UIO[Response] =
-    collect(Seq.empty).map ( signature => Response.text(signature).addHeader(Header.CacheControl.NoStore) )
+    collect(Seq.empty).map(signature => Response.text(signature).addHeader(Header.CacheControl.NoStore))
 
   private final case class NginxProcess(
       pid: Long,
@@ -41,13 +41,13 @@ object Debug extends BackendPlugin:
     ZIO
       .foreach(
         Seq(
-          "Operating system"               -> operatingSystem,
-          "Disk space"                     -> diskSpace,
-          "Memory"                         -> memory,
-          "Environment variables"          -> environmentVariables,
+          "Operating system" -> operatingSystem,
+          "Disk space" -> diskSpace,
+          "Memory" -> memory,
+          "Environment variables" -> environmentVariables,
           "Backend command-line arguments" -> ZIO.succeed(commandLineArguments(applicationArguments)),
-          "Java runtime"                   -> javaRuntime,
-          "nginx reverse proxy"            -> nginx
+          "Java runtime" -> javaRuntime,
+          "nginx reverse proxy" -> nginx
         )
       )((title, body) => section(title, body))
       .map(_.mkString("\n\n") + "\n")
@@ -60,26 +60,26 @@ object Debug extends BackendPlugin:
 
   private def operatingSystem: Task[String] =
     for
-      name         <- systemProperty("os.name")
-      version      <- systemProperty("os.version")
+      name <- systemProperty("os.name")
+      version <- systemProperty("os.version")
       architecture <- systemProperty("os.arch")
-      processors   <- ZIO.attempt(Runtime.getRuntime.availableProcessors().toString)
+      processors <- ZIO.attempt(Runtime.getRuntime.availableProcessors().toString)
       linuxDetails <-
         if name.toLowerCase.contains("linux") then linuxOperatingSystemDetails(version)
         else ZIO.succeed(Seq.empty)
       properties = Seq(
-        "Name"         -> name,
-        "Version"      -> version,
+        "Name" -> name,
+        "Version" -> version,
         "Architecture" -> architecture,
-        "Processors"   -> processors
+        "Processors" -> processors
       )
     yield (properties ++ linuxDetails).map((key, value) => s"$key: $value").mkString("\n")
 
   private def linuxOperatingSystemDetails(osVersion: String): UIO[Seq[(String, String)]] =
     for
-      osRelease     <- readFileOption(Paths.get("/etc/os-release"))
+      osRelease <- readFileOption(Paths.get("/etc/os-release"))
       kernelRelease <- readFileOption(Paths.get("/proc/sys/kernel/osrelease"))
-      procVersion   <- readFileOption(Paths.get("/proc/version"))
+      procVersion <- readFileOption(Paths.get("/proc/version"))
       distribution = osRelease.flatMap: contents =>
         osReleaseValue(contents, "PRETTY_NAME").orElse(osReleaseValue(contents, "NAME"))
       kernel = kernelRelease
@@ -94,24 +94,26 @@ object Debug extends BackendPlugin:
       Option(File.listRoots()).toSeq.flatten match
         case Seq() => "Unavailable: no filesystem roots were reported"
         case roots =>
-          roots.sortBy(_.getAbsolutePath).map: root =>
-            val total  = root.getTotalSpace
-            val free   = root.getFreeSpace
-            val usable = root.getUsableSpace
-            Seq(
-              s"Filesystem: ${root.getAbsolutePath}",
-              s"  Total: ${formatBytes(total)} ($total bytes)",
-              s"  Free: ${formatBytes(free)} ($free bytes)",
-              s"  Usable by this process: ${formatBytes(usable)} ($usable bytes)"
-            ).mkString("\n")
-          .mkString("\n")
+          roots
+            .sortBy(_.getAbsolutePath)
+            .map: root =>
+              val total = root.getTotalSpace
+              val free = root.getFreeSpace
+              val usable = root.getUsableSpace
+              Seq(
+                s"Filesystem: ${root.getAbsolutePath}",
+                s"  Total: ${formatBytes(total)} ($total bytes)",
+                s"  Free: ${formatBytes(free)} ($free bytes)",
+                s"  Usable by this process: ${formatBytes(usable)} ($usable bytes)"
+              ).mkString("\n")
+            .mkString("\n")
 
   private def memory: Task[String] =
     ZIO.attempt:
-      val runtime  = Runtime.getRuntime
+      val runtime = Runtime.getRuntime
       val jvmTotal = runtime.totalMemory()
-      val jvmFree  = runtime.freeMemory()
-      val jvmUsed  = jvmTotal - jvmFree
+      val jvmFree = runtime.freeMemory()
+      val jvmUsed = jvmTotal - jvmFree
       val jvm = Seq(
         s"JVM maximum heap: ${formatBytes(runtime.maxMemory())} (${runtime.maxMemory()} bytes)",
         s"JVM allocated heap: ${formatBytes(jvmTotal)} ($jvmTotal bytes)",
@@ -122,9 +124,9 @@ object Debug extends BackendPlugin:
       val physical = ManagementFactory.getOperatingSystemMXBean match
         case bean: com.sun.management.OperatingSystemMXBean =>
           val totalMemory = bean.getTotalMemorySize
-          val freeMemory  = bean.getFreeMemorySize
-          val totalSwap   = bean.getTotalSwapSpaceSize
-          val freeSwap    = bean.getFreeSwapSpaceSize
+          val freeMemory = bean.getFreeMemorySize
+          val totalSwap = bean.getTotalSwapSpaceSize
+          val freeSwap = bean.getFreeSwapSpaceSize
           Seq(
             s"Physical memory total: ${formatBytes(totalMemory)} ($totalMemory bytes)",
             s"Physical memory free: ${formatBytes(freeMemory)} ($freeMemory bytes)",
@@ -137,7 +139,10 @@ object Debug extends BackendPlugin:
 
   private def environmentVariables: Task[String] =
     ZIO.attempt:
-      java.lang.System.getenv().asScala.toSeq
+      java.lang.System
+        .getenv()
+        .asScala
+        .toSeq
         .sortBy(_._1)
         .map((key, value) => s"$key=${escape(value)}")
         .mkString("\n") match
@@ -150,13 +155,13 @@ object Debug extends BackendPlugin:
 
   private def javaRuntime: Task[String] =
     for
-      javaVersion    <- systemProperty("java.version")
-      runtimeName    <- systemProperty("java.runtime.name")
+      javaVersion <- systemProperty("java.version")
+      runtimeName <- systemProperty("java.runtime.name")
       runtimeVersion <- systemProperty("java.runtime.version")
-      vmName         <- systemProperty("java.vm.name")
-      vmVersion      <- systemProperty("java.vm.version")
-      vendor         <- systemProperty("java.vendor")
-      javaHome       <- systemProperty("java.home")
+      vmName <- systemProperty("java.vm.name")
+      vmVersion <- systemProperty("java.vm.version")
+      vendor <- systemProperty("java.vendor")
+      javaHome <- systemProperty("java.home")
       inputArguments <- ZIO.attempt:
         ManagementFactory.getRuntimeMXBean.getInputArguments.asScala.map(escape).mkString(" ") match
           case ""   => "(none)"
@@ -172,7 +177,7 @@ object Debug extends BackendPlugin:
 
   private def nginx: Task[String] =
     findNginxProcesses.flatMap:
-      case Seq() => ZIO.succeed("Running: no\nReverse proxy detected: no\nConfiguration: not attempted")
+      case Seq()     => ZIO.succeed("Running: no\nReverse proxy detected: no\nConfiguration: not attempted")
       case processes =>
         val processSummary = processes.map: process =>
           val details = process.commandLine.orElse(process.command).getOrElse("command unavailable")
@@ -186,7 +191,8 @@ object Debug extends BackendPlugin:
                 "Processes:",
                 processSummary.mkString("\n"),
                 s"Configuration extraction: failed ($reason)"
-              ).mkString("\n"),
+              ).mkString("\n")
+          ,
           (source, configuration) =>
             ZIO.succeed:
               val reverseProxy = containsReverseProxyDirective(configuration)
@@ -210,15 +216,15 @@ object Debug extends BackendPlugin:
         .flatMap: handles =>
           for
             processHandles <- ZIO.attemptBlocking(handles.iterator().asScala.toSeq)
-            processes      <- ZIO.foreach(processHandles)(inspectNginxProcess)
+            processes <- ZIO.foreach(processHandles)(inspectNginxProcess)
           yield processes.flatten.sortBy(_.pid)
 
   private def inspectNginxProcess(handle: ProcessHandle): Task[Option[NginxProcess]] =
     ZIO
       .attemptBlocking:
-        val info        = handle.info()
-        val command     = optional(info.command())
-        val arguments   = optional(info.arguments()).map(_.toSeq).getOrElse(Seq.empty)
+        val info = handle.info()
+        val command = optional(info.command())
+        val arguments = optional(info.arguments()).map(_.toSeq).getOrElse(Seq.empty)
         val commandLine = optional(info.commandLine())
         (command, arguments, commandLine, command.flatMap(fileName))
       .flatMap: (command, arguments, commandLine, commandName) =>
@@ -256,10 +262,10 @@ object Debug extends BackendPlugin:
               .start()
         )(stopProcess)
         completed <- blocking(process.waitFor(5, TimeUnit.SECONDS))
-        _         <- if completed then ZIO.unit else ZIO.fail("nginx -T timed out after 5 seconds")
-        output    <- readFile(outputFile).mapError(describe).map(_.trim)
-        exitCode  <- blocking(process.exitValue())
-        result    <-
+        _ <- if completed then ZIO.unit else ZIO.fail("nginx -T timed out after 5 seconds")
+        output <- readFile(outputFile).mapError(describe).map(_.trim)
+        exitCode <- blocking(process.exitValue())
+        result <-
           if exitCode == 0 && output.nonEmpty then ZIO.succeed("nginx -T" -> output)
           else ZIO.fail(s"nginx -T exited with status $exitCode: ${firstLine(output)}")
       yield result
@@ -270,8 +276,8 @@ object Debug extends BackendPlugin:
   private def stopProcess(process: Process): UIO[Unit] =
     ZIO
       .attemptBlocking:
-        if process.isAlive then process.destroyForcibly()
-        ()
+        if process.isAlive then
+          val _ = process.destroyForcibly()
       .ignore
 
   private def nginxConfigArguments(arguments: Seq[String]): Seq[String] =
@@ -280,9 +286,11 @@ object Debug extends BackendPlugin:
 
   private def nginxConfigCandidates(process: NginxProcess): Seq[Path] =
     val prefix = argumentOption(process.arguments, "-p").map(Paths.get(_))
-    val configured = argumentOption(process.arguments, "-c").map(Paths.get(_)).map: path =>
-      if path.isAbsolute then path else prefix.map(_.resolve(path)).getOrElse(path)
-    val besideExecutable = 
+    val configured = argumentOption(process.arguments, "-c")
+      .map(Paths.get(_))
+      .map: path =>
+        if path.isAbsolute then path else prefix.map(_.resolve(path)).getOrElse(path)
+    val besideExecutable =
       process.command.flatMap(command => Option(Paths.get(command).getParent)).map(_.resolve("conf/nginx.conf"))
     (configured.toSeq ++ besideExecutable.toSeq ++ Seq(
       Paths.get("/etc/nginx/nginx.conf"),
@@ -292,7 +300,7 @@ object Debug extends BackendPlugin:
 
   private def argumentOption(arguments: Seq[String], name: String): Option[String] =
     arguments.zipWithIndex.collectFirst:
-      case (argument, index) if argument == name && index + 1 < arguments.length => arguments(index + 1)
+      case (argument, index) if argument == name && index + 1 < arguments.length       => arguments(index + 1)
       case (argument, _) if argument.startsWith(name) && argument.length > name.length => argument.drop(name.length)
 
   private def containsReverseProxyDirective(configuration: String): Boolean =
@@ -324,7 +332,7 @@ object Debug extends BackendPlugin:
     if bytes < 1024 then s"$bytes B"
     else
       var value = bytes.toDouble
-      var unit  = 0
+      var unit = 0
       while value >= 1024 && unit < units.length - 1 do
         value /= 1024
         unit += 1
@@ -338,7 +346,7 @@ object Debug extends BackendPlugin:
       case '\t' => "\\t"
       case char => char.toString
 
-  private def firstLine(value: String): String = 
+  private def firstLine(value: String): String =
     value.linesIterator.nextOption().filter(_.nonEmpty).getOrElse("no output")
 
   private def describe(error: Throwable): String =

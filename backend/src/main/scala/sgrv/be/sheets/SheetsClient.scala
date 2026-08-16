@@ -7,8 +7,8 @@ import scala.jdk.CollectionConverters.*
 import zio.{IO, ZIO}
 import zio.http.{Body, Client, Header, Headers, MediaType, Method, Request, Response, URL}
 
-/** ZIO boundary around the Google Sheets v4 and Drive v3 REST APIs, authenticated with a per-call OAuth access
-  * token. Used by the `/sheets` routes to act on Google Sheets on behalf of a signed-in session.
+/** ZIO boundary around the Google Sheets v4 and Drive v3 REST APIs, authenticated with a per-call OAuth access token.
+  * Used by the `/sheets` routes to act on Google Sheets on behalf of a signed-in session.
   */
 private[sheets] trait SheetsClient:
   def findSpreadsheet(accessToken: String, name: String): IO[SheetsError, Option[String]]
@@ -26,16 +26,15 @@ private[sheets] object SheetsClient:
   def fromClient(client: Client): SheetsClient = Live(client)
 
   private final case class Live(client: Client) extends SheetsClient:
-    private val driveFilesUrl  = "https://www.googleapis.com/drive/v3/files"
-    private val sheetsBaseUrl  = "https://sheets.googleapis.com/v4/spreadsheets"
+    private val driveFilesUrl = "https://www.googleapis.com/drive/v3/files"
+    private val sheetsBaseUrl = "https://sheets.googleapis.com/v4/spreadsheets"
 
     override def findSpreadsheet(accessToken: String, name: String): IO[SheetsError, Option[String]] =
       for
-        url      <- urlWithQuery(driveFilesUrl, Seq("q" -> driveQuery(name), "fields" -> "files(id)", "pageSize" -> "1"))
+        url <- urlWithQuery(driveFilesUrl, Seq("q" -> driveQuery(name), "fields" -> "files(id)", "pageSize" -> "1"))
         response <- call(Method.GET, url, accessToken, body = None)
         spreadsheetId <- expected(response):
-          Option(response.json.getAsJsonArray("files"))
-            .toSeq
+          Option(response.json.getAsJsonArray("files")).toSeq
             .flatMap(_.asScala)
             .headOption
             .map(_.getAsJsonObject.get("id").getAsString)
@@ -47,9 +46,9 @@ private[sheets] object SheetsClient:
         properties = new JsonObject
         _ = properties.addProperty("title", name)
         body = new JsonObject
-        _    = body.add("properties", properties)
+        _ = body.add("properties", properties)
         response <- call(Method.POST, url, accessToken, body = Some(body))
-        id       <- expected(response)(response.json.get("spreadsheetId").getAsString)
+        id <- expected(response)(response.json.get("spreadsheetId").getAsString)
       yield id
 
     override def appendRow(accessToken: String, spreadsheetId: String, values: Seq[String]): IO[SheetsError, Unit] =
@@ -58,13 +57,13 @@ private[sheets] object SheetsClient:
           s"$sheetsBaseUrl/$spreadsheetId/values/A:B:append",
           Seq("valueInputOption" -> "RAW", "insertDataOption" -> "INSERT_ROWS")
         )
-        row  = new com.google.gson.JsonArray
-        _    = values.foreach(row.add)
+        row = new com.google.gson.JsonArray
+        _ = values.foreach(row.add)
         rows = new com.google.gson.JsonArray
-        _    = rows.add(row)
+        _ = rows.add(row)
         body = new JsonObject
-        _    = body.add("values", rows)
-        _    <- call(Method.POST, url, accessToken, body = Some(body))
+        _ = body.add("values", rows)
+        _ <- call(Method.POST, url, accessToken, body = Some(body))
       yield ()
 
     override def readColumns(
@@ -73,11 +72,10 @@ private[sheets] object SheetsClient:
         range: String
     ): IO[SheetsError, Seq[Seq[String]]] =
       for
-        url      <- parseUrl(s"$sheetsBaseUrl/$spreadsheetId/values/$range")
+        url <- parseUrl(s"$sheetsBaseUrl/$spreadsheetId/values/$range")
         response <- call(Method.GET, url, accessToken, body = None)
         values <- expected(response):
-          Option(response.json.getAsJsonArray("values"))
-            .toSeq
+          Option(response.json.getAsJsonArray("values")).toSeq
             .flatMap(_.asScala)
             .map(_.getAsJsonArray.asScala.map(_.getAsString).toSeq)
       yield values
@@ -88,7 +86,7 @@ private[sheets] object SheetsClient:
 
     private def parseUrl(raw: String): IO[SheetsError, URL] =
       URL.decode(raw) match
-        case Right(url) => ZIO.succeed(url)
+        case Right(url)  => ZIO.succeed(url)
         case Left(error) =>
           ZIO.fail(
             UnexpectedGoogleResponse(
@@ -113,16 +111,18 @@ private[sheets] object SheetsClient:
     ): IO[SheetsError, GoogleResponse] =
       val operation = s"$method $url"
       for
-        response <- client.batched(
-          Request(
-            method  = method,
-            url     = url,
-            headers = requestHeaders(accessToken, body.isDefined),
-            body    = body.fold(Body.empty)(json => Body.fromString(json.toString))
+        response <- client
+          .batched(
+            Request(
+              method = method,
+              url = url,
+              headers = requestHeaders(accessToken, body.isDefined),
+              body = body.fold(Body.empty)(json => Body.fromString(json.toString))
+            )
           )
-        ).mapError(error => GoogleUnavailable(operation, cause = Some(error)))
+          .mapError(error => GoogleUnavailable(operation, cause = Some(error)))
         text <- response.body.asString.mapError(error => GoogleUnavailable(operation, cause = Some(error)))
-        _    <- failIfUnsuccessful(operation, response, text)
+        _ <- failIfUnsuccessful(operation, response, text)
         json <- ZIO
           .attempt(JsonParser.parseString(if text.isBlank then "{}" else text).getAsJsonObject)
           .mapError(error => UnexpectedGoogleResponse(operation, Some(response.status.code), Some(text), Some(error)))
@@ -137,18 +137,20 @@ private[sheets] object SheetsClient:
       else ZIO.fail(unsuccessfulResponse(operation, response.status.code, text))
 
     private def expected[A](response: GoogleResponse)(value: => A): IO[SheetsError, A] =
-      ZIO.attempt(value).mapError(error =>
-        UnexpectedGoogleResponse(
-          response.operation,
-          Some(response.statusCode),
-          Some(response.text),
-          Some(error)
+      ZIO
+        .attempt(value)
+        .mapError(error =>
+          UnexpectedGoogleResponse(
+            response.operation,
+            Some(response.statusCode),
+            Some(response.text),
+            Some(error)
+          )
         )
-      )
 
   private[sheets] def unsuccessfulResponse(operation: String, statusCode: Int, text: String): SheetsError =
     statusCode match
-      case 401 | 403 => Unauthenticated(Some(s"HTTP $statusCode: $text"))
-      case 429       => GoogleUnavailable(operation, Some(s"HTTP $statusCode: $text"))
+      case 401 | 403           => Unauthenticated(Some(s"HTTP $statusCode: $text"))
+      case 429                 => GoogleUnavailable(operation, Some(s"HTTP $statusCode: $text"))
       case code if code >= 500 => GoogleUnavailable(operation, Some(s"HTTP $statusCode: $text"))
       case _                   => UnexpectedGoogleResponse(operation, Some(statusCode), Some(text))

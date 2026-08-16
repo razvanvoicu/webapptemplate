@@ -8,7 +8,7 @@ import zio.http.Client
 type BackendEnvironment = GoogleOAuth & SessionStore & TokenGenerator & Client
 
 private[be] object BackendCapabilities:
-  val googleOAuth: Capability[GoogleOAuth]       = Capability("google-oauth")
-  val sessionStore: Capability[SessionStore]     = Capability("session-store")
+  val googleOAuth: Capability[GoogleOAuth] = Capability("google-oauth")
+  val sessionStore: Capability[SessionStore] = Capability("session-store")
   val tokenGenerator: Capability[TokenGenerator] = Capability("token-generator")
-  val httpClient: Capability[Client]              = Capability("http-client")
+  val httpClient: Capability[Client] = Capability("http-client")

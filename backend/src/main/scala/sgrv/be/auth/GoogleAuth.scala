@@ -13,7 +13,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 import zio.{Task, UIO, ZIO, ZLayer}
 
 final case class SessionUser(email: String, name: String, refreshToken: Option[String] = None)
-final case class GoogleAuthentication(user: SessionUser, refreshToken: Option[String])
+final case class GoogleAuthentication(user: SessionUser)
 
 /** ZIO boundary around the Google OAuth client library. */
 trait GoogleOAuth:
@@ -24,7 +24,7 @@ trait GoogleOAuth:
 
 private[be] object GoogleOAuth:
   private val authorizationEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
-  private val baseScopes              = Seq("openid", "email", "profile")
+  private val baseScopes = Seq("openid", "email", "profile")
 
   def authorizationUrl(state: String): ZIO[GoogleOAuth, Nothing, String] =
     ZIO.serviceWithZIO[GoogleOAuth](_.authorizationUrl(state))
@@ -35,8 +35,8 @@ private[be] object GoogleOAuth:
   def callbackIsSecure: ZIO[GoogleOAuth, Nothing, Boolean] =
     ZIO.serviceWithZIO[GoogleOAuth](_.callbackIsSecure)
 
-  /** Exchanges a stored OAuth refresh token for a fresh, short-lived access token, used by backend routes acting
-    * on Google APIs (e.g. Sheets/Drive) on behalf of a signed-in session.
+  /** Exchanges a stored OAuth refresh token for a fresh, short-lived access token, used by backend routes acting on
+    * Google APIs (e.g. Sheets/Drive) on behalf of a signed-in session.
     */
   def accessToken(refreshToken: String): ZIO[GoogleOAuth, Throwable, String] =
     ZIO.serviceWithZIO[GoogleOAuth](_.accessToken(refreshToken))
@@ -73,13 +73,15 @@ private[be] object GoogleOAuth:
         val idToken = Option(verifier.verify(tokenResponse.getIdToken))
           .getOrElse(throw new IllegalStateException("The Google ID token failed verification"))
         val payload = idToken.getPayload
-        val email = Option(payload.getEmail).map(_.trim).filter(_.nonEmpty)
+        val email = Option(payload.getEmail)
+          .map(_.trim)
+          .filter(_.nonEmpty)
           .getOrElse(throw new IllegalStateException("The Google ID token carries no email address"))
         if payload.getEmailVerified != java.lang.Boolean.TRUE then
           throw new IllegalStateException(s"Google reports $email as unverified")
-        val user = SessionUser(email, displayName(Option(payload.get("name")).map(_.toString), email))
         val refreshToken = Option(tokenResponse.getRefreshToken).map(_.trim).filter(_.nonEmpty)
-        GoogleAuthentication(user, refreshToken)
+        val user = SessionUser(email, displayName(Option(payload.get("name")).map(_.toString), email), refreshToken)
+        GoogleAuthentication(user)
 
     override def callbackIsSecure: UIO[Boolean] = ZIO.succeed(config.callbackIsSecure)
 
@@ -88,7 +90,9 @@ private[be] object GoogleOAuth:
         val tokenResponse =
           new GoogleRefreshTokenRequest(transport, jsonFactory, refreshToken, config.clientId, config.clientSecret)
             .execute()
-        Option(tokenResponse.getAccessToken).map(_.trim).filter(_.nonEmpty)
+        Option(tokenResponse.getAccessToken)
+          .map(_.trim)
+          .filter(_.nonEmpty)
           .getOrElse(throw new IllegalStateException("Google returned no access token for the stored refresh token"))
 
   private[auth] def authorizationUrl(
@@ -98,20 +102,23 @@ private[be] object GoogleOAuth:
       extraScopes: Seq[String] = Seq.empty
   ): String =
     Seq(
-      "client_id"     -> clientId,
-      "redirect_uri"  -> redirectUri,
+      "client_id" -> clientId,
+      "redirect_uri" -> redirectUri,
       "response_type" -> "code",
-      "scope"         -> (baseScopes ++ extraScopes).mkString(" "),
-      "state"         -> state,
+      "scope" -> (baseScopes ++ extraScopes).mkString(" "),
+      "state" -> state,
       // "consent" forces Google to show the full consent screen (and reissue a refresh token) on every login,
       // rather than silently reusing a prior grant that may predate scopes this app has since started requesting.
-      "prompt"        -> "select_account consent",
-      "access_type"   -> "offline"
+      "prompt" -> "select_account consent",
+      "access_type" -> "offline"
     ).map((name, value) => s"$name=${URLEncoder.encode(value, UTF_8)}")
       .mkString(s"$authorizationEndpoint?", "&", "")
 
   private[auth] def displayName(name: Option[String], email: String): String =
-    name.map(_.trim).filter(_.nonEmpty).getOrElse:
-      email.takeWhile(_ != '@') match
-        case ""          => email
-        case mailboxName => mailboxName
+    name
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .getOrElse:
+        email.takeWhile(_ != '@') match
+          case ""          => email
+          case mailboxName => mailboxName

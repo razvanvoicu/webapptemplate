@@ -1,7 +1,7 @@
 package sgrv.be.auth
 
 import java.util.Base64
-import zio.{Chunk, Random, UIO, ZIO, ZLayer}
+import zio.{Random, UIO, ZIO, ZLayer}
 
 trait TokenGenerator:
   def generate(bytes: Int): UIO[String]
@@ -14,5 +14,7 @@ private[be] object TokenGenerator:
     ZLayer.succeed:
       new TokenGenerator:
         override def generate(bytes: Int): UIO[String] =
-          Random.nextBytes(bytes).map: value =>
-            Base64.getUrlEncoder.withoutPadding.encodeToString(value.toArray)
+          Random
+            .nextBytes(bytes)
+            .map: value =>
+              Base64.getUrlEncoder.withoutPadding.encodeToString(value.toArray)

@@ -2,8 +2,10 @@ package sgrv.be.auth
 
 import sgrv.be.BackendCapabilities
 import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
+import sgrv.api.CurrentUser
 import zio.ZIO
 import zio.http.{Header, Method, Request, Response, Routes, handler}
+import zio.json.*
 
 /** Resolves the opaque browser session cookie through Firestore and reports its user to the frontend. */
 object Me extends BackendPlugin:
@@ -23,12 +25,4 @@ object Me extends BackendPlugin:
         case Left(response) => response
       .map(_.addHeader(Header.CacheControl.NoStore))
 
-  private[auth] def json(user: SessionUser): String = s"""{"email":${quote(user.email)},"name":${quote(user.name)}}"""
-
-  private def quote(value: String): String =
-    value.flatMap:
-      case '"'                          => "\\\""
-      case '\\'                         => "\\\\"
-      case character if character < ' ' => f"\\u${character.toInt}%04x"
-      case character                    => character.toString
-    .mkString("\"", "", "\"")
+  private[auth] def json(user: SessionUser): String = CurrentUser(user.email, user.name).toJson

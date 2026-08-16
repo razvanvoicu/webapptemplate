@@ -20,8 +20,10 @@ private[be] object RouteDiscovery:
       classLoader: ClassLoader = getClass.getClassLoader
   ): Task[Seq[PluginStatus]] =
     scan(classLoader).flatMap: classNames =>
-      ZIO.foreach(classNames)(loadStatus(_, registry, classLoader)).map: loaded =>
-        rejectConflicts(rejectDuplicateIds(loaded), reservedPatterns)
+      ZIO
+        .foreach(classNames)(loadStatus(_, registry, classLoader))
+        .map: loaded =>
+          rejectConflicts(rejectDuplicateIds(loaded), reservedPatterns)
 
   private def scan(classLoader: ClassLoader): Task[Seq[String]] =
     ZIO.scoped:
@@ -46,10 +48,10 @@ private[be] object RouteDiscovery:
   private[be] def load(className: String, classLoader: ClassLoader): Task[BackendPlugin] =
     ZIO.attemptBlocking:
       val moduleClass = Class.forName(className.stripSuffix("$") + "$", true, classLoader)
-      //noinspection IllegalNull
+      // noinspection IllegalNull
       moduleClass.getField("MODULE$").get(null) match
         case plugin: BackendPlugin => plugin
-        case module =>
+        case module                =>
           throw new IllegalArgumentException(
             s"Discovered module ${module.getClass.getName} does not implement ${classOf[BackendPlugin].getName}"
           )
@@ -62,10 +64,12 @@ private[be] object RouteDiscovery:
     load(className, classLoader).foldZIO(
       error => ZIO.succeed(PluginStatus.Rejected(className, describe(error))),
       plugin =>
-        ZIO.attempt(activate(plugin, className, registry)).fold(
-          error => PluginStatus.Failed(safeId(plugin), className, error),
-          identity
-        )
+        ZIO
+          .attempt(activate(plugin, className, registry))
+          .fold(
+            error => PluginStatus.Failed(safeId(plugin), className, error),
+            identity
+          )
     )
 
   private[be] def activate(
@@ -74,8 +78,7 @@ private[be] object RouteDiscovery:
       registry: CapabilityRegistry
   ): PluginStatus =
     val pluginId = plugin.id.trim
-    if !validPluginId.matches(pluginId) then
-      PluginStatus.Rejected(className, s"Invalid plugin id '${plugin.id}'")
+    if !validPluginId.matches(pluginId) then PluginStatus.Rejected(className, s"Invalid plugin id '${plugin.id}'")
     else if plugin.apiVersion != BackendPlugin.ApiVersion then
       PluginStatus.Rejected(
         className,
@@ -83,7 +86,7 @@ private[be] object RouteDiscovery:
       )
     else
       plugin.requirements.resolve(registry) match
-        case Left(missing) => PluginStatus.Skipped(pluginId, className, missing)
+        case Left(missing)      => PluginStatus.Skipped(pluginId, className, missing)
         case Right(environment) =>
           try PluginStatus.Active(pluginId, className, close(plugin, environment))
           catch case error: Throwable => PluginStatus.Failed(pluginId, className, error)
@@ -95,11 +98,13 @@ private[be] object RouteDiscovery:
     plugin.routes
       .transform[plugin.Requires]: routeHandler =>
         handler: (request: Request) =>
-          plugin.accessPolicy.authorize(request).flatMap:
-            case Left(response) => ZIO.succeed(response)
-            case Right(context) =>
-              ZIO.scoped:
-                routeHandler(request).provideSomeEnvironment[plugin.Requires & Scope](_.add(context))
+          plugin.accessPolicy
+            .authorize(request)
+            .flatMap:
+              case Left(response) => ZIO.succeed(response)
+              case Right(context) =>
+                ZIO.scoped:
+                  routeHandler(request).provideSomeEnvironment[plugin.Requires & Scope](_.add(context))
       .transform[Any](_.provideEnvironment(environment))
 
   private[be] def rejectConflicts(
@@ -115,7 +120,7 @@ private[be] object RouteDiscovery:
     val reservedConflicts = active.flatMap: plugin =>
       plugin.routes.routes.map(_.routePattern: Any).filter(reservedPatterns).map(_ -> Seq(plugin.id))
     val allConflicts = conflicts ++ reservedConflicts
-    val rejectedIds  = allConflicts.values.flatten.toSet
+    val rejectedIds = allConflicts.values.flatten.toSet
 
     statuses.map:
       case active: PluginStatus.Active if rejectedIds(active.id) =>
@@ -139,7 +144,8 @@ private[be] object RouteDiscovery:
       case status => status
 
   private[be] def fromStatuses(statuses: Seq[PluginStatus]): Routes[Any, Nothing] =
-    statuses.collect { case PluginStatus.Active(_, _, routes) => routes }
+    statuses
+      .collect { case PluginStatus.Active(_, _, routes) => routes }
       .foldLeft(Routes.empty: Routes[Any, Nothing])(_ ++ _)
 
   def routes(
@@ -147,15 +153,16 @@ private[be] object RouteDiscovery:
       reservedPatterns: Set[Any] = Set.empty
   ): Task[Routes[Any, Nothing]] =
     discover(registry, reservedPatterns).flatMap: statuses =>
-      ZIO.foreachDiscard(statuses):
-        case PluginStatus.Active(id, _, _) => ZIO.logInfo(s"Activated backend plugin $id")
-        case PluginStatus.Skipped(id, _, missing) =>
-          ZIO.logWarning(s"Skipped backend plugin $id; missing capabilities: ${missing.map(_.id).mkString(", ")}")
-        case PluginStatus.Rejected(className, reason) =>
-          ZIO.logWarning(s"Rejected backend plugin $className: $reason")
-        case PluginStatus.Failed(id, className, cause) =>
-          ZIO.logErrorCause(s"Backend plugin $id ($className) failed during activation", zio.Cause.fail(cause))
-      .as(fromStatuses(statuses))
+      ZIO
+        .foreachDiscard(statuses):
+          case PluginStatus.Active(id, _, _)        => ZIO.logInfo(s"Activated backend plugin $id")
+          case PluginStatus.Skipped(id, _, missing) =>
+            ZIO.logWarning(s"Skipped backend plugin $id; missing capabilities: ${missing.map(_.id).mkString(", ")}")
+          case PluginStatus.Rejected(className, reason) =>
+            ZIO.logWarning(s"Rejected backend plugin $className: $reason")
+          case PluginStatus.Failed(id, className, cause) =>
+            ZIO.logErrorCause(s"Backend plugin $id ($className) failed during activation", zio.Cause.fail(cause))
+        .as(fromStatuses(statuses))
 
   private def describe(error: Throwable): String =
     Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)

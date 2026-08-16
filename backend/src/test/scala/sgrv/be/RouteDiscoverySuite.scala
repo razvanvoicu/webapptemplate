@@ -16,7 +16,7 @@ object EchoPlugin extends BackendPlugin:
   override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
   override val routes: Routes[Requires & RequestContext, Nothing] = Routes(
     Method.POST / "echo" -> handler((request: Request) => Response.text(s"${request.method.name}:${request.url.path}")),
-    Method.PUT / "echo"  -> handler((request: Request) => Response.text(s"${request.method.name}:${request.url.path}"))
+    Method.PUT / "echo" -> handler((request: Request) => Response.text(s"${request.method.name}:${request.url.path}"))
   )
 
 object ProtectedEchoPlugin extends BackendPlugin:
@@ -65,8 +65,7 @@ class RouteDiscoverySuite extends munit.FunSuite:
         sessionKey: String,
         user: SessionUser,
         createdAt: Instant,
-        expiresAt: Instant,
-        refreshToken: Option[String]
+        expiresAt: Instant
     ): Task[Unit] = ZIO.unit
 
     override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] = ZIO.none
@@ -112,14 +111,13 @@ class RouteDiscoverySuite extends munit.FunSuite:
 
   test("resolves an authenticated session once and supplies its user to the route context"):
     val lookups = new AtomicInteger(0)
-    val user    = SessionUser("jane@example.com", "Jane", Some("refresh-token"))
+    val user = SessionUser("jane@example.com", "Jane", Some("refresh-token"))
     val countingStore: SessionStore = new SessionStore:
       override def create(
           sessionKey: String,
           user: SessionUser,
           createdAt: Instant,
-          expiresAt: Instant,
-          refreshToken: Option[String]
+          expiresAt: Instant
       ): Task[Unit] = ZIO.unit
 
       override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] =
@@ -128,8 +126,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
           Option.when(sessionKey == "session-key")(user)
 
     val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore))
-    val status   = RouteDiscovery.activate(ProtectedEchoPlugin, ProtectedEchoPlugin.getClass.getName, registry)
-    val routes   = RouteDiscovery.fromStatuses(Seq(status))
+    val status = RouteDiscovery.activate(ProtectedEchoPlugin, ProtectedEchoPlugin.getClass.getName, registry)
+    val routes = RouteDiscovery.fromStatuses(Seq(status))
     val request = Request
       .get(URL.decode("/protected-echo").toOption.get)
       .addCookie(Cookie.Request("session", "session-key"))
@@ -141,14 +139,13 @@ class RouteDiscoverySuite extends munit.FunSuite:
 
   test("an authenticated Sheets request reads its Firestore session only once"):
     val lookups = new AtomicInteger(0)
-    val user    = SessionUser("jane@example.com", "Jane")
+    val user = SessionUser("jane@example.com", "Jane")
     val countingStore: SessionStore = new SessionStore:
       override def create(
           sessionKey: String,
           user: SessionUser,
           createdAt: Instant,
-          expiresAt: Instant,
-          refreshToken: Option[String]
+          expiresAt: Instant
       ): Task[Unit] = ZIO.unit
 
       override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] =
@@ -170,14 +167,14 @@ class RouteDiscoverySuite extends munit.FunSuite:
       CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore, googleOAuth))
     ) match
       case PluginStatus.Skipped(_, _, missing) => assertEquals(missing.map(_.id), Chunk("http-client"))
-      case other                               => fail(s"Expected the generic HTTP capability to be missing, got $other")
+      case other => fail(s"Expected the generic HTTP capability to be missing, got $other")
 
     val response = run:
       (for
         httpClient <- ZIO.service[Client]
         registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore, googleOAuth, httpClient))
-        status   = RouteDiscovery.activate(SpreadsheetContent, SpreadsheetContent.getClass.getName, registry)
-        routes   = RouteDiscovery.fromStatuses(Seq(status))
+        status = RouteDiscovery.activate(SpreadsheetContent, SpreadsheetContent.getClass.getName, registry)
+        routes = RouteDiscovery.fromStatuses(Seq(status))
         request = Request
           .get(URL.decode("/sheets/content?name=Budget").toOption.get)
           .addCookie(Cookie.Request("session", "session-key"))
@@ -192,9 +189,9 @@ class RouteDiscoverySuite extends munit.FunSuite:
       override val value = "alpha"
     val beta: TestBeta = new TestBeta:
       override val value = "beta"
-    val alphaCapability  = Capability[TestAlpha]("test-alpha")
-    val betaCapability   = Capability[TestBeta]("test-beta")
-    val registry         = CapabilityRegistry.fromEnvironment(ZEnvironment(alpha, beta))
+    val alphaCapability = Capability[TestAlpha]("test-alpha")
+    val betaCapability = Capability[TestBeta]("test-beta")
+    val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(alpha, beta))
     val plugin = new BackendPlugin:
       type Requires = TestAlpha & TestBeta
 
@@ -209,10 +206,10 @@ class RouteDiscoverySuite extends munit.FunSuite:
             b <- ZIO.service[TestBeta]
           yield Response.text(s"${a.value}:${b.value}")
       )
-    val status   = RouteDiscovery.activate(plugin, "ComposedPlugin", registry)
-    val routes   = RouteDiscovery.fromStatuses(Seq(status))
+    val status = RouteDiscovery.activate(plugin, "ComposedPlugin", registry)
+    val routes = RouteDiscovery.fromStatuses(Seq(status))
     val response = run(ZIO.scoped(routes.runZIO(Request.get(URL.decode("/composed").toOption.get))))
-    val missing  = RouteDiscovery.activate(plugin, "ComposedPlugin", CapabilityRegistry.empty)
+    val missing = RouteDiscovery.activate(plugin, "ComposedPlugin", CapabilityRegistry.empty)
 
     assertEquals(run(response.body.asString), "alpha:beta")
     missing match
@@ -221,7 +218,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
       case other => fail(s"Expected both missing capabilities, got $other")
 
   test("rejects a plugin compiled for an incompatible plugin API"):
-    val status = RouteDiscovery.activate(IncompatiblePlugin, IncompatiblePlugin.getClass.getName, CapabilityRegistry.empty)
+    val status =
+      RouteDiscovery.activate(IncompatiblePlugin, IncompatiblePlugin.getClass.getName, CapabilityRegistry.empty)
 
     status match
       case PluginStatus.Rejected(_, reason) => assert(reason.contains("API version"), reason)
@@ -253,7 +251,7 @@ class RouteDiscoverySuite extends munit.FunSuite:
     assertEquals(RouteDiscovery.fromStatuses(statuses).routes.size, 0)
 
   test("rejects every active plugin sharing the same stable id"):
-    val first  = PluginStatus.Active("duplicate", "First", Routes.empty)
+    val first = PluginStatus.Active("duplicate", "First", Routes.empty)
     val second = PluginStatus.Active("duplicate", "Second", Routes.empty)
     val statuses = RouteDiscovery.rejectDuplicateIds(Seq(first, second))
 
@@ -291,5 +289,5 @@ class RouteDiscoverySuite extends munit.FunSuite:
     })
     assert(statuses.exists {
       case PluginStatus.Failed("test-failed", _, _) => true
-      case _                                         => false
+      case _                                        => false
     })

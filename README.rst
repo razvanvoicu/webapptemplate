@@ -32,11 +32,6 @@ Once signed in, a small form appears under the greeting exercising the Google Sh
 to find-or-create that spreadsheet in the signed-in user's Google Drive, append a row recording the request's
 server timestamp and the browser's User-Agent, and display the spreadsheet's current content in a table.
 
-The separately packaged Debug plugin can add a diagnostic ``/debug`` route; see `Admin-protected routes`_. It
-returns the backend's system signature as plain text, reporting operating-system, disk, memory, environment, Java
-runtime, and nginx reverse-proxy information when available. The plugin is included only when a file under
-``.local/`` configures ``ADMINPASSWORDPATH``; otherwise normal builds ignore it.
-
 The backend owns the static-file routes, but application API routes are not
 coupled to ``Main``. ``RouteDiscovery`` scans the ``sgrv.be`` package on the
 runtime classpath for objects implementing the nominal ``BackendPlugin`` interface. Each plugin returns native
@@ -69,12 +64,16 @@ Default Credentials as described below. From the repository root, run:
 Then open http://localhost:8888/.
 
 The server binds to IPv4 loopback (``127.0.0.1``). Its port defaults to ``8888``.
-A valid first command-line argument takes precedence over the ``PORT``
-environment variable:
+The first command-line argument takes precedence over the ``PORT`` environment
+variable:
 
 .. code-block:: console
 
    sbt "run 9000"
+
+When supplied, either value must be an integer from ``1`` to ``65535``. An
+invalid value stops startup with a configuration error instead of silently
+falling back to ``8888``.
 
 On Windows, the development server can be stopped by port with:
 
@@ -265,6 +264,11 @@ session. There is no process-global encryption key and backend restarts do not
 invalidate sessions; Firestore is the durable session store. Treat document
 IDs, ``sessionKey``, and ``refreshToken`` values as secrets.
 
+On production startup, ``DatabaseAdmin.live`` ensures that ``Access.expiresAt`` has a Firestore TTL policy. Firestore
+therefore removes expired session documents asynchronously instead of retaining every rejected session indefinitely.
+The update is idempotent and its server-side backfill does not block HTTP startup. Emulator runs skip this production
+admin operation; their in-memory data is cleared when the emulator restarts.
+
 A missing or expired session produces ``401 Unauthorized``. A Firestore error
 produces ``503 Service Unavailable`` and is logged, rather than being presented
 to the frontend as an unauthenticated session.
@@ -400,6 +404,15 @@ an old JAR cannot persist as linked state.
 The password travels as a URL query parameter, so treat it like any other bearer credential: it can end up in
 browser history and proxy or server access logs. Rotate ``admin.pwd`` and redeploy if it leaks.
 
+**CAUTION:** The ``Debug`` module is not meant to be part of a *real* production
+deployment. It is only meant to be useful as a means of exploring a prospective
+deployment environment in the cloud, such as AppEngine, CloudRun, or Lambda,
+in order to find out the underlying environment where the production artifact
+will run. You may deploy a debug-enabled empty project into, say, Google Cloud's
+App Engine to find out the size of the virtual machine it would run on, and how
+nginx is configured as a reverse proxy. However, as you deploy your real production
+app, make sure to configure the build to not include ``Debug``.
+
 Adding a backend plugin
 -----------------------
 
@@ -455,6 +468,26 @@ compact format with a millisecond timestamp and request summary:
 
 The logger accepts ``TRACE`` and higher levels. It deliberately omits fiber IDs
 and request and response sizes from the text output.
+
+Compiler hygiene and formatting
+--------------------------------
+
+Every Scala subproject enables deprecation, feature, unchecked, unused-code, and discarded-value warnings.
+SemanticDB is also enabled so Scalafix can apply semantic rules. Format the whole repository and remove unused
+code with:
+
+.. code-block:: console
+
+   sbt fmt
+
+Verify that Scalafix and Scalafmt would make no changes with:
+
+.. code-block:: console
+
+   sbt fmtCheck
+
+The aliases explicitly include the separately packaged Debug plugin and E2E project as well as the projects
+aggregated by the root build.
 
 Tests and coverage
 ------------------
@@ -774,15 +807,3 @@ worked examples of the shapes a new route is likely to take:
   ``BackendCapabilities.httpClient``, and construct the adapter inside the plugin. No API-specific service is
   added to ``BackendEnvironment`` or ``Main``.
 
-Security warning
-----------------
-
-When its standalone plugin JAR is linked, the ``/debug`` route intentionally exposes sensitive diagnostic data,
-including all environment-variable values and potentially nginx
-configuration. Because OAuth credentials and the admin password are injected
-into the environment, this includes ``GOOGLE_OAUTH_CLIENT_SECRET`` and
-``ADMIN_PASSWORD`` itself. It is gated by both a signed-in session and the
-``AuthenticatedAndAdminPassword`` policy described in `Admin-protected routes`_ rather than left
-open, but that second gate is only as strong as ``admin.pwd``: keep it a
-long, random, secret value, and remember the caveats there about the
-password appearing in a URL.

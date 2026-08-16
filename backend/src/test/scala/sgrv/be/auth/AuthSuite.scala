@@ -1,14 +1,11 @@
 package sgrv.be.auth
 
-import zio.{Runtime, Task, Unsafe, ZIO}
+import com.google.firestore.admin.v1.Field
+import java.time.Instant
+import scala.jdk.CollectionConverters.*
 import zio.http.{Path, Method as ZioMethod}
 
 class AuthSuite extends munit.FunSuite:
-
-  private def run[A](effect: Task[A]): A =
-    Unsafe.unsafe { implicit unsafe =>
-      Runtime.default.unsafe.run(effect).getOrThrowFiberFailure()
-    }
 
   test("validates and normalizes the configured public base URL"):
     assertEquals(AppConfig.validatePublicBaseUrl("http://localhost:8888/"), Right("http://localhost:8888"))
@@ -47,34 +44,46 @@ class AuthSuite extends munit.FunSuite:
       extraScopes = Seq("https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file")
     )
 
-    assert(url.contains(
-      "scope=openid+email+profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fspreadsheets" +
-        "+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file"
-    ))
+    assert(
+      url.contains(
+        "scope=openid+email+profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fspreadsheets" +
+          "+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file"
+      )
+    )
 
   test("loads and trims the environment-supplied OAuth configuration"):
-    val configuration = AppConfig.fromEnvironment(Map(
-      "GOOGLE_OAUTH_CLIENT_ID" -> " client-id ",
-      "GOOGLE_OAUTH_CLIENT_SECRET" -> " client-secret ",
-      "PUBLIC_BASE_URL" -> " https://app.example.com/ ",
-      "GCP_PROJECT_ID" -> " project-id ",
-      "FIRESTORE_DATABASE_ID" -> " database-id ",
-      "FIRESTORE_LOCATION" -> " location "
-    ))
+    val configuration = AppConfig.fromEnvironment(
+      Map(
+        "GOOGLE_OAUTH_CLIENT_ID" -> " client-id ",
+        "GOOGLE_OAUTH_CLIENT_SECRET" -> " client-secret ",
+        "PUBLIC_BASE_URL" -> " https://app.example.com/ ",
+        "GCP_PROJECT_ID" -> " project-id ",
+        "FIRESTORE_DATABASE_ID" -> " database-id ",
+        "FIRESTORE_LOCATION" -> " location "
+      )
+    )
 
     assertEquals(
       configuration,
-      Right(AppConfig(
-        OAuthConfig("client-id", "client-secret", "https://app.example.com"),
-        FirestoreConfig("project-id", "database-id", "location")
-      ))
+      Right(
+        AppConfig(
+          OAuthConfig("client-id", "client-secret", "https://app.example.com"),
+          FirestoreConfig("project-id", "database-id", "location")
+        )
+      )
     )
 
   test("requires the public base URL"):
-    val error = AppConfig.fromEnvironment(Map(
-      "GOOGLE_OAUTH_CLIENT_ID" -> "client-id",
-      "GOOGLE_OAUTH_CLIENT_SECRET" -> "client-secret"
-    )).left.toOption.get
+    val error = AppConfig
+      .fromEnvironment(
+        Map(
+          "GOOGLE_OAUTH_CLIENT_ID" -> "client-id",
+          "GOOGLE_OAUTH_CLIENT_SECRET" -> "client-secret"
+        )
+      )
+      .left
+      .toOption
+      .get
 
     assertEquals(error.getMessage, "Environment variable PUBLIC_BASE_URL is not set or is empty; see prod.env")
 
@@ -88,7 +97,10 @@ class AuthSuite extends munit.FunSuite:
 
   test("rejects an incomplete OAuth configuration"):
     val error = AppConfig.fromEnvironment(Map("GOOGLE_OAUTH_CLIENT_ID" -> "client-id")).left.toOption.get
-    assertEquals(error.getMessage, "Environment variable GOOGLE_OAUTH_CLIENT_SECRET is not set or is empty; see prod.env")
+    assertEquals(
+      error.getMessage,
+      "Environment variable GOOGLE_OAUTH_CLIENT_SECRET is not set or is empty; see prod.env"
+    )
 
   test("falls back to the mailbox name when Google supplies no display name"):
     assertEquals(GoogleOAuth.displayName(Some("Jane Doe"), "jane@example.com"), "Jane Doe")
@@ -98,6 +110,55 @@ class AuthSuite extends munit.FunSuite:
 
   test("serialises the signed-in user as escaped JSON"):
     assertEquals(Me.json(SessionUser("a@b.c", "Jane \"JJ\" Doe")), """{"email":"a@b.c","name":"Jane \"JJ\" Doe"}""")
+
+  test("configures expiresAt as the Access collection TTL field"):
+    val config = FirestoreConfig("project-id", "database-id", "location")
+    val request = DatabaseAdmin.sessionTtlUpdateRequest(config)
+
+    assertEquals(
+      request.getField.getName,
+      "projects/project-id/databases/database-id/collectionGroups/Access/fields/expiresAt"
+    )
+    assert(request.getField.hasTtlConfig)
+    assertEquals(request.getUpdateMask.getPathsList.asScala.toSeq, Seq("ttl_config"))
+
+  test("repairs only missing or failed session TTL configurations"):
+    val active = Field
+      .newBuilder()
+      .setTtlConfig(Field.TtlConfig.newBuilder().setState(Field.TtlConfig.State.ACTIVE))
+      .build()
+    val creating = Field
+      .newBuilder()
+      .setTtlConfig(Field.TtlConfig.newBuilder().setState(Field.TtlConfig.State.CREATING))
+      .build()
+    val needsRepair = Field
+      .newBuilder()
+      .setTtlConfig(Field.TtlConfig.newBuilder().setState(Field.TtlConfig.State.NEEDS_REPAIR))
+      .build()
+
+    assert(DatabaseAdmin.sessionTtlNeedsUpdate(Field.getDefaultInstance))
+    assert(!DatabaseAdmin.sessionTtlNeedsUpdate(active))
+    assert(!DatabaseAdmin.sessionTtlNeedsUpdate(creating))
+    assert(DatabaseAdmin.sessionTtlNeedsUpdate(needsRepair))
+
+  test("persists the refresh token carried by SessionUser"):
+    val createdAt = Instant.parse("2026-08-16T00:00:00Z")
+    val expiresAt = Instant.parse("2026-08-23T00:00:00Z")
+    val withToken = SessionStore.documentFields(
+      "session-key",
+      SessionUser("jane@example.com", "Jane", Some("refresh-token")),
+      createdAt,
+      expiresAt
+    )
+    val withoutToken = SessionStore.documentFields(
+      "session-key",
+      SessionUser("jane@example.com", "Jane"),
+      createdAt,
+      expiresAt
+    )
+
+    assertEquals(withToken.get("refreshToken"), "refresh-token")
+    assert(!withoutToken.containsKey("refreshToken"))
 
   test("auth plugins expose their native typed routes"):
     Seq(

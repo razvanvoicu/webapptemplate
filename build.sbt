@@ -1,14 +1,16 @@
 import Dependencies._
 import org.scalajs.linker.interface.ModuleKind
+import sbtcrossproject.CrossPlugin.autoImport.*
+import scalajscrossproject.ScalaJSCrossPlugin.autoImport.*
 
 // Local pointer files keep machine-specific secret locations outside source control. OAuth configuration is
 // compulsory; Debug remains opt-in. Each pointer must be the first line of exactly one regular file directly
 // under .local. Relative target paths are resolved from the repository root.
-val repositoryDir          = file(".").getCanonicalFile
-val localConfigDir         = repositoryDir / ".local"
-val oauthConfigPathPrefix  = "OAUTHCONFIGPATH="
+val repositoryDir = file(".").getCanonicalFile
+val localConfigDir = repositoryDir / ".local"
+val oauthConfigPathPrefix = "OAUTHCONFIGPATH="
 val adminPasswordPathPrefix = "ADMINPASSWORDPATH="
-val publicBaseUrlPrefix     = "PUBLIC_BASE_URL="
+val publicBaseUrlPrefix = "PUBLIC_BASE_URL="
 
 // The Google OAuth "Web application" JSON downloaded from Google Cloud; must contain web.client_id and
 // web.client_secret. Merely loading the build fails if its compulsory .local pointer or target file is absent.
@@ -68,21 +70,46 @@ lazy val optionalDebugPluginJar = taskKey[Option[File]](
 )
 
 addCommandAlias("artifact", "deploymentArtifact")
+addCommandAlias("fmt", ";scalafixAll;debugPlugin/scalafixAll;e2etest/scalafixAll;scalafmtRepo")
+addCommandAlias(
+  "fmtCheck",
+  ";scalafixAll --check;debugPlugin/scalafixAll --check;e2etest/scalafixAll --check;scalafmtCheckRepo"
+)
 
-ThisBuild / scalaVersion     := "3.8.4"
-ThisBuild / version          := "0.1.0-SNAPSHOT"
-ThisBuild / organization     := "com.example"
+ThisBuild / scalaVersion := "3.8.4"
+ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / organization := "com.example"
 ThisBuild / organizationName := "example"
+ThisBuild / scalacOptions ++= Seq(
+  "-deprecation",
+  "-feature",
+  "-unchecked",
+  "-Wunused:all",
+  "-Wvalue-discard"
+)
+ThisBuild / semanticdbEnabled := true
+
+lazy val shared = crossProject(JSPlatform, JVMPlatform)
+  .crossType(CrossType.Pure)
+  .in(file("shared"))
+  .settings(
+    name := "webapptemplate-shared",
+    libraryDependencies += "dev.zio" %%% "zio-json" % zioJsonVersion
+  )
+
+lazy val sharedJS = shared.js
+lazy val sharedJVM = shared.jvm
 
 lazy val frontend = (project in file("frontend"))
   .enablePlugins(ScalaJSPlugin)
+  .dependsOn(sharedJS)
   .settings(
-    name                            := "webapptemplate-frontend",
-    coverageEnabled                 := false,
+    name := "webapptemplate-frontend",
+    coverageEnabled := false,
     scalaJSUseMainModuleInitializer := true,
     scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.NoModule)),
     libraryDependencies ++= Seq(
-      "com.raquo"    %%% "laminar"     % laminarVersion,
+      "com.raquo" %%% "laminar" % laminarVersion,
       "org.scala-js" %%% "scalajs-dom" % scalajsDomVersion
     )
   )
@@ -90,7 +117,7 @@ lazy val frontend = (project in file("frontend"))
 // Copies the linked Scala.js output into the backend's classpath under `web/` to facilitate packaging and local running
 lazy val frontendAssets = Def.task {
   val linkedDir = (frontend / Compile / fastLinkJSOutput).value
-  val outDir    = (Compile / resourceManaged).value / "web"
+  val outDir = (Compile / resourceManaged).value / "web"
   IO.createDirectory(outDir)
   linkedDir.listFiles().filter(_.isFile).toSeq.map { src =>
     val dest = outDir / src.getName
@@ -133,13 +160,21 @@ def waitForPortOpen(host: String, port: Int, timeoutMillis: Long): Boolean = {
 }
 
 lazy val backend = (project in file("backend"))
+  .dependsOn(sharedJVM)
   .settings(
     name := "webapptemplate-backend",
     libraryDependencies ++= Seq(
-      classGraph, zioHttp, zioLogging, firestore, firestoreAdmin, googleApiClient, gson, munit % Test
+      classGraph,
+      zioHttp,
+      zioLogging,
+      firestore,
+      firestoreAdmin,
+      googleApiClient,
+      gson,
+      munit % Test
     ),
     Compile / resourceGenerators += frontendAssets.taskValue,
-    run / fork         := true,
+    run / fork := true,
     run / connectInput := true,
     // Some networks hand out AAAA (IPv6) records for googleapis.com without actually routing IPv6, which makes
     // outbound Sheets/Drive calls fail with NoRouteToHostException; prefer IPv4 to avoid that.
@@ -158,8 +193,8 @@ lazy val backend = (project in file("backend"))
     Test / unmanagedClasspath ++= optionalDebugPluginJar.value.toSeq.map(Attributed.blank)
   )
 
-/** Optional diagnostic plugin. It compiles against the backend SPI and produces a separate JAR. Runtime and
-  * test tasks add it to backend classpaths only when the current .local contents configure ADMINPASSWORDPATH.
+/** Optional diagnostic plugin. It compiles against the backend SPI and produces a separate JAR. Runtime and test tasks
+  * add it to backend classpaths only when the current .local contents configure ADMINPASSWORDPATH.
   */
 lazy val debugPlugin = (project in file("debug-plugin"))
   .dependsOn(backend % "provided->compile")
@@ -177,19 +212,21 @@ lazy val debugPlugin = (project in file("debug-plugin"))
 // clobbering the other's data.
 lazy val e2etest = (project in file("e2etest"))
   .settings(
-    name            := "webapptemplate-e2etest",
+    name := "webapptemplate-e2etest",
     coverageEnabled := false,
     libraryDependencies ++= Seq(selenium % Test, munit % Test),
     launchTestBrowser := {
-      val log      = streams.value.log
+      val log = streams.value.log
       val repoRoot = (ThisBuild / baseDirectory).value
 
       val testEnv = parseEnvFile((backend / Compile / resourceDirectory).value / "test.env")
       val (emulatorHost, emulatorPort) =
-        testEnv.getOrElse(
-          "FIRESTORE_EMULATOR_HOST",
-          sys.error("backend/src/main/resources/test.env is missing FIRESTORE_EMULATOR_HOST")
-        ).split(":", 2) match {
+        testEnv
+          .getOrElse(
+            "FIRESTORE_EMULATOR_HOST",
+            sys.error("backend/src/main/resources/test.env is missing FIRESTORE_EMULATOR_HOST")
+          )
+          .split(":", 2) match {
           case Array(host, port) => (host, port.toInt)
           case _                 => sys.error(s"Malformed FIRESTORE_EMULATOR_HOST in test.env")
         }
@@ -271,7 +308,8 @@ lazy val e2etest = (project in file("e2etest"))
         .newBuilder(java.net.URI.create(s"http://127.0.0.1:$testBrowserDebugPort/json/new?http://localhost:8888/"))
         .PUT(java.net.http.HttpRequest.BodyPublishers.noBody())
         .build()
-      java.net.http.HttpClient.newHttpClient()
+      java.net.http.HttpClient
+        .newHttpClient()
         .send(newTabRequest, java.net.http.HttpResponse.BodyHandlers.discarding())
 
       log.info(
@@ -298,7 +336,7 @@ lazy val e2etest = (project in file("e2etest"))
       (Test / testOnly).toTask(" sgrv.e2e.SampleSpreadsheetE2ESuite")
     }.value,
     Test / test := Def.taskDyn {
-      val log      = streams.value.log
+      val log = streams.value.log
       val repoRoot = (ThisBuild / baseDirectory).value
 
       log.info("Checking that Selenium can launch Chrome...")
@@ -339,7 +377,7 @@ lazy val e2etest = (project in file("e2etest"))
       }
 
       val ready = {
-        val client  = java.net.http.HttpClient.newHttpClient()
+        val client = java.net.http.HttpClient.newHttpClient()
         val request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:8888/")).GET().build()
         val deadline = System.currentTimeMillis() + 90000
         var upAt: Option[Long] = None
@@ -373,119 +411,127 @@ lazy val e2etest = (project in file("e2etest"))
   )
 
 lazy val root = {
-  Project(id = "root", base = file(".")).aggregate(frontend, backend).settings(
-    name            := "webapptemplate",
-    coverageEnabled := false,
-    publish / skip  := true,
-    run / aggregate := false,
-    Compile / run   := (backend / Compile / run).evaluated,
-    Test / test / aggregate := false,
-    Test / test := Def.taskDyn {
-      if ((backend / localAdminPasswordFile).value.nonEmpty)
-        Def.task {
-          (frontend / Test / test).value
-          (backend / Test / test).value
-          (debugPlugin / Test / test).value
-        }
-      else
-        Def.task {
-          (frontend / Test / test).value
-          (backend / Test / test).value
-        }
-    }.value,
-    clean / aggregate := false,
-    clean := {
-      (frontend / clean).value
-      (backend / clean).value
-      (debugPlugin / clean).value
-      IO.delete((Compile / target).value)
-    },
-    readmeToHtml := {
-      val log       = streams.value.log
-      val repoRoot  = (ThisBuild / baseDirectory).value
-      val outputDir = (Compile / target).value
-      IO.createDirectory(outputDir)
-      val exitCode =
-        try
-          sys.process.Process(Seq("python3", "-m", "docutils", "README.rst", "target/README.html"), repoRoot).!
-        catch {
-          case _: java.io.IOException =>
-            sys.error("python3 not found on PATH, or its docutils module isn't installed (`pip install docutils`).")
-        }
-      if (exitCode != 0) sys.error(s"docutils failed to render README.rst (exit code $exitCode)")
-      log.success(s"Rendered README.rst to ${outputDir / "README.html"}")
-    },
-    deploymentArtifact := Def.taskDyn {
-      val deploymentEnv = PublicBaseUrlBuild.configEnv(
-        LocalConfigBuild.requiredValue(localConfigDir, publicBaseUrlPrefix)
-      )
-      clean.value
-      Def.task {
-        val log         = streams.value.log
-        val appJar      = (backend / Compile / packageBin).value
-        val debugJars    = (backend / optionalDebugPluginJar).value.toSeq
-        val runtimeJars = (
-          (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile) ++ debugJars
-        ).distinct
-        val resources   = (backend / Compile / resourceDirectory).value
-        val outputDir   = (backend / Compile / target).value
-
-        val duplicateJarNames = runtimeJars.groupBy(_.getName).collect {
-          case (jarName, jars) if jars.size > 1 => jarName
-        }
-        if (duplicateJarNames.nonEmpty)
-          sys.error(s"Runtime dependency filename collision: ${duplicateJarNames.mkString(", ")}")
-
-        val generatedEnv = OAuthBuild.configEnv(oauthConfigFile) ++
-          (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv) ++
-          deploymentEnv
-
-        // Stage the Docker build context: app.jar, lib/*.jar, a secret-bearing prod.env, runApp (the image's
-        // entrypoint), the Dockerfile itself, and (if available) local ADC for testing outside a GCP platform's
-        // own workload identity.
-        val dockerDir = outputDir / "docker"
-        IO.delete(dockerDir)
-        IO.createDirectory(dockerDir / "lib")
-        IO.createDirectory(dockerDir / "adc")
-        IO.copyFile(appJar, dockerDir / "app.jar")
-        runtimeJars.foreach(jar => IO.copyFile(jar, dockerDir / "lib" / jar.getName))
-
-        val sourceEnv = resources / "prod.env"
-        if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
-        val envLines = IO.readLines(sourceEnv) ++ OAuthBuild.envLines(generatedEnv)
-        // Explicit "\n" rather than IO.writeLines (which joins with the platform line separator, i.e. "\r\n"
-        // when this task runs on Windows): prod.env is `.`-sourced by the POSIX runApp script regardless of
-        // which OS built it, and a CRLF-corrupted value there isn't caught by this app's own defensive
-        // trimming for every variable (PORT notably isn't trimmed before being parsed as an integer).
-        IO.write(dockerDir / "prod.env", envLines.map(_ + "\n").mkString)
-
-        Seq("runApp", "Dockerfile").foreach { fileName =>
-          val source = resources / fileName
-          if (!source.isFile) sys.error(s"Missing packaging resource: ${source.getAbsolutePath}")
-          IO.copyFile(source, dockerDir / fileName)
-        }
-
-        if (adcFile.isFile)
-          IO.copyFile(adcFile, dockerDir / "adc" / "application_default_credentials.json")
+  Project(id = "root", base = file("."))
+    .aggregate(sharedJS, sharedJVM, frontend, backend)
+    .settings(
+      name := "webapptemplate",
+      coverageEnabled := false,
+      publish / skip := true,
+      run / aggregate := false,
+      Compile / run := (backend / Compile / run).evaluated,
+      Test / test / aggregate := false,
+      Test / test := Def.taskDyn {
+        if ((backend / localAdminPasswordFile).value.nonEmpty)
+          Def.task {
+            (frontend / Test / test).value
+            (backend / Test / test).value
+            (debugPlugin / Test / test).value
+          }
         else
-          log.warn(
-            s"No Application Default Credentials found at ${adcFile.getAbsolutePath}; building the Docker image " +
-              "without them. Run `gcloud auth application-default login` first, or supply credentials to the " +
-              "container another way (e.g. GCP workload identity on Cloud Run/GKE/GCE)."
-          )
-
-        val imageTag = s"${name.value}:${version.value}"
-        val dockerBuildArgs = Seq(
-          "docker", "build",
-          "--platform", dockerPlatform,
-          "-t", imageTag,
-          "-t", s"${name.value}:latest",
-          "."
+          Def.task {
+            (frontend / Test / test).value
+            (backend / Test / test).value
+          }
+      }.value,
+      clean / aggregate := false,
+      clean := {
+        (sharedJS / clean).value
+        (sharedJVM / clean).value
+        (frontend / clean).value
+        (backend / clean).value
+        (debugPlugin / clean).value
+        IO.delete((Compile / target).value)
+      },
+      readmeToHtml := {
+        val log = streams.value.log
+        val repoRoot = (ThisBuild / baseDirectory).value
+        val outputDir = (Compile / target).value
+        IO.createDirectory(outputDir)
+        val exitCode =
+          try
+            sys.process.Process(Seq("python3", "-m", "docutils", "README.rst", "target/README.html"), repoRoot).!
+          catch {
+            case _: java.io.IOException =>
+              sys.error("python3 not found on PATH, or its docutils module isn't installed (`pip install docutils`).")
+          }
+        if (exitCode != 0) sys.error(s"docutils failed to render README.rst (exit code $exitCode)")
+        log.success(s"Rendered README.rst to ${outputDir / "README.html"}")
+      },
+      deploymentArtifact := Def.taskDyn {
+        val deploymentEnv = PublicBaseUrlBuild.configEnv(
+          LocalConfigBuild.requiredValue(localConfigDir, publicBaseUrlPrefix)
         )
-        val exitCode = sys.process.Process(dockerBuildArgs, dockerDir).!
-        if (exitCode != 0) sys.error(s"docker build failed for $imageTag (exit code $exitCode)")
-        log.success(s"Built Docker image for $dockerPlatform: $imageTag (and ${name.value}:latest)")
-      }
-    }.value
-  )
+        clean.value
+        Def.task {
+          val log = streams.value.log
+          val appJar = (backend / Compile / packageBin).value
+          val debugJars = (backend / optionalDebugPluginJar).value.toSeq
+          val runtimeJars = (
+            (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile) ++ debugJars
+          ).distinct
+          val resources = (backend / Compile / resourceDirectory).value
+          val outputDir = (backend / Compile / target).value
+
+          val duplicateJarNames = runtimeJars.groupBy(_.getName).collect {
+            case (jarName, jars) if jars.size > 1 => jarName
+          }
+          if (duplicateJarNames.nonEmpty)
+            sys.error(s"Runtime dependency filename collision: ${duplicateJarNames.mkString(", ")}")
+
+          val generatedEnv = OAuthBuild.configEnv(oauthConfigFile) ++
+            (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv) ++
+            deploymentEnv
+
+          // Stage the Docker build context: app.jar, lib/*.jar, a secret-bearing prod.env, runApp (the image's
+          // entrypoint), the Dockerfile itself, and (if available) local ADC for testing outside a GCP platform's
+          // own workload identity.
+          val dockerDir = outputDir / "docker"
+          IO.delete(dockerDir)
+          IO.createDirectory(dockerDir / "lib")
+          IO.createDirectory(dockerDir / "adc")
+          IO.copyFile(appJar, dockerDir / "app.jar")
+          runtimeJars.foreach(jar => IO.copyFile(jar, dockerDir / "lib" / jar.getName))
+
+          val sourceEnv = resources / "prod.env"
+          if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
+          val envLines = IO.readLines(sourceEnv) ++ OAuthBuild.envLines(generatedEnv)
+          // Explicit "\n" rather than IO.writeLines (which joins with the platform line separator, i.e. "\r\n"
+          // when this task runs on Windows): prod.env is `.`-sourced by the POSIX runApp script regardless of
+          // which OS built it, and a CRLF-corrupted value there isn't caught by this app's own defensive
+          // trimming for every variable (PORT notably isn't trimmed before being parsed as an integer).
+          IO.write(dockerDir / "prod.env", envLines.map(_ + "\n").mkString)
+
+          Seq("runApp", "Dockerfile").foreach { fileName =>
+            val source = resources / fileName
+            if (!source.isFile) sys.error(s"Missing packaging resource: ${source.getAbsolutePath}")
+            IO.copyFile(source, dockerDir / fileName)
+          }
+
+          if (adcFile.isFile)
+            IO.copyFile(adcFile, dockerDir / "adc" / "application_default_credentials.json")
+          else
+            log.warn(
+              s"No Application Default Credentials found at ${adcFile.getAbsolutePath}; building the Docker image " +
+                "without them. Run `gcloud auth application-default login` first, or supply credentials to the " +
+                "container another way (e.g. GCP workload identity on Cloud Run/GKE/GCE)."
+            )
+
+          val imageTag = s"${name.value}:${version.value}"
+          val dockerBuildArgs = Seq(
+            "docker",
+            "build",
+            "--platform",
+            dockerPlatform,
+            "-t",
+            imageTag,
+            "-t",
+            s"${name.value}:latest",
+            "."
+          )
+          val exitCode = sys.process.Process(dockerBuildArgs, dockerDir).!
+          if (exitCode != 0) sys.error(s"docker build failed for $imageTag (exit code $exitCode)")
+          log.success(s"Built Docker image for $dockerPlatform: $imageTag (and ${name.value}:latest)")
+        }
+      }.value
+    )
 }

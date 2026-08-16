@@ -3,9 +3,10 @@ package sgrv.be.sheets
 import sgrv.be.BackendCapabilities
 import sgrv.be.auth.{GoogleOAuth, SessionStore, SessionUser}
 import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
-import java.time.Instant
-import zio.{Cause, IO, UIO, ZIO}
+import sgrv.api.{SpreadsheetContentResponse, UpsertSpreadsheetRequest, UpsertSpreadsheetResponse}
+import zio.{Cause, Clock, IO, UIO, ZIO}
 import zio.http.{Client, Header, Method, Request, Response, Routes, Status, handler}
+import zio.json.*
 
 /** Shared plumbing for the `/sheets` routes. */
 private[sheets] object SheetsRoutes:
@@ -16,14 +17,16 @@ private[sheets] object SheetsRoutes:
 
   /** `Authenticated` is guaranteed by these plugins' access policy; a different context indicates a host bug. */
   def authenticatedRequest: ZIO[RequestContext, Nothing, RequestContext.Authenticated] =
-    ZIO.service[RequestContext].flatMap:
-      case request: RequestContext.Authenticated => ZIO.succeed(request)
-      case _: RequestContext.Public => ZIO.dieMessage("Authenticated route received a public request context")
+    ZIO
+      .service[RequestContext]
+      .flatMap:
+        case request: RequestContext.Authenticated => ZIO.succeed(request)
+        case _: RequestContext.Public => ZIO.dieMessage("Authenticated route received a public request context")
 
   def responseFor(error: SheetsError): Response =
     error match
       case InvalidInput(message, _) => Response.text(message).status(Status.BadRequest)
-      case _: Unauthenticated =>
+      case _: Unauthenticated       =>
         Response
           .text("Google authorization is missing or expired; sign out and sign in again.")
           .status(Status.Forbidden)
@@ -38,29 +41,25 @@ private[sheets] object SheetsRoutes:
       case None        => ZIO.logError(error.diagnostic)
     log.as(responseFor(error))
 
-  def extractName(body: String): Option[String] =
-    "(?s)\"name\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"".r
-      .findFirstMatchIn(body)
-      .map(m => unescape(m.group(1)))
-      .map(_.trim)
-      .filter(_.nonEmpty)
+  def decodeName(body: String): Either[SheetsError, String] =
+    body
+      .fromJson[UpsertSpreadsheetRequest]
+      .left
+      .map(details =>
+        InvalidInput(
+          "Request body must be valid JSON with a string \"name\" field.",
+          Some(new IllegalArgumentException(details))
+        )
+      )
+      .flatMap(request =>
+        Option(request.name)
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .toRight(InvalidInput("Missing or empty \"name\" in the request body"))
+      )
 
-  private def unescape(value: String): String =
-    value.replace("\\\"", "\"").replace("\\\\", "\\")
-
-  def rowsJson(rows: Seq[Seq[String]]): String =
-    rows.map(row => row.map(quote).mkString("[", ",", "]")).mkString("""{"rows":[""", ",", "]}")
-
-  def quote(value: String): String =
-    value.flatMap {
-      case '"'                          => "\\\""
-      case '\\'                         => "\\\\"
-      case character if character < ' ' => f"\\u${character.toInt}%04x"
-      case character                    => character.toString
-    }.mkString("\"", "", "\"")
-
-/** Finds or creates a spreadsheet by name in the signed-in user's Google Drive, then appends one row recording
-  * this request's server timestamp and the requesting browser's User-Agent.
+/** Finds or creates a spreadsheet by name in the signed-in user's Google Drive, then appends one row recording this
+  * request's server timestamp and the requesting browser's User-Agent.
   */
 object UpsertSpreadsheet extends BackendPlugin:
   type Requires = GoogleOAuth & SessionStore & Client
@@ -80,15 +79,16 @@ object UpsertSpreadsheet extends BackendPlugin:
     val request = authenticated.request
     val result =
       for
-        refreshToken  <- requireRefreshToken(authenticated.user)
-        name          <- requireName(request)
-        accessToken   <- GoogleOAuth.accessToken(refreshToken).mapError(SheetsError.fromAccessTokenFailure)
-        httpClient    <- ZIO.service[Client]
-        sheetsClient   = SheetsClient.fromClient(httpClient)
+        refreshToken <- requireRefreshToken(authenticated.user)
+        name <- requireName(request)
+        accessToken <- GoogleOAuth.accessToken(refreshToken).mapError(SheetsError.fromAccessTokenFailure)
+        httpClient <- ZIO.service[Client]
+        sheetsClient = SheetsClient.fromClient(httpClient)
         spreadsheetId <- sheetsClient.ensureSpreadsheet(accessToken, name)
         userAgent = request.header(Header.UserAgent).map(_.renderedValue).getOrElse("unknown")
-        _ <- sheetsClient.appendRow(accessToken, spreadsheetId, Seq(Instant.now().toString, userAgent))
-      yield Response.json(s"""{"spreadsheetId":${quote(spreadsheetId)}}""")
+        now <- Clock.instant
+        _ <- sheetsClient.appendRow(accessToken, spreadsheetId, Seq(now.toString, userAgent))
+      yield Response.json(UpsertSpreadsheetResponse(spreadsheetId).toJson)
     result.foldZIO(handle, ZIO.succeed)
 
   private def requireName(request: Request): IO[SheetsError, String] =
@@ -96,13 +96,11 @@ object UpsertSpreadsheet extends BackendPlugin:
       body <- request.body.asString.mapError(error =>
         SheetsError.InvalidInput("The request body could not be read.", Some(error))
       )
-      name <- ZIO
-        .fromOption(extractName(body))
-        .orElseFail(SheetsError.InvalidInput("Missing or empty \"name\" in the request body"))
+      name <- ZIO.fromEither(decodeName(body))
     yield name
 
-/** Reports the current content of columns A and B of a spreadsheet by name, or an empty result if no spreadsheet
-  * with that name exists yet for the signed-in user.
+/** Reports the current content of columns A and B of a spreadsheet by name, or an empty result if no spreadsheet with
+  * that name exists yet for the signed-in user.
   */
 object SpreadsheetContent extends BackendPlugin:
   type Requires = GoogleOAuth & SessionStore & Client
@@ -127,10 +125,10 @@ object SpreadsheetContent extends BackendPlugin:
           .fromOption(request.queryParam("name").map(_.trim).filter(_.nonEmpty))
           .orElseFail(SheetsError.InvalidInput("Missing \"name\" query parameter"))
         accessToken <- GoogleOAuth.accessToken(refreshToken).mapError(SheetsError.fromAccessTokenFailure)
-        httpClient  <- ZIO.service[Client]
+        httpClient <- ZIO.service[Client]
         sheetsClient = SheetsClient.fromClient(httpClient)
         spreadsheetId <- sheetsClient.findSpreadsheet(accessToken, name)
-        rows <- spreadsheetId.fold(ZIO.succeed(Seq.empty[Seq[String]])):
-          id => sheetsClient.readColumns(accessToken, id, "A:B")
-      yield Response.json(rowsJson(rows))
+        rows <- spreadsheetId.fold(ZIO.succeed(Seq.empty[Seq[String]])): id =>
+          sheetsClient.readColumns(accessToken, id, "A:B")
+      yield Response.json(SpreadsheetContentResponse(rows).toJson)
     result.foldZIO(handle, ZIO.succeed)
