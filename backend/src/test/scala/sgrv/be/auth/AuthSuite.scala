@@ -10,16 +10,22 @@ class AuthSuite extends munit.FunSuite:
       Runtime.default.unsafe.run(effect).getOrThrowFiberFailure()
     }
 
-  test("derives the callback URI from the host and the forwarded protocol"):
-    assertEquals(GoogleOAuth.redirectUri(Some("localhost:8888"), None), Some("http://localhost:8888/auth/callback"))
-    assertEquals(GoogleOAuth.redirectUri(Some("127.0.0.1:8888"), None), Some("http://127.0.0.1:8888/auth/callback"))
-    assertEquals(GoogleOAuth.redirectUri(Some("app.example.com"), None), Some("https://app.example.com/auth/callback"))
-    assertEquals(
-      GoogleOAuth.redirectUri(Some("app.example.com"), Some("http")),
-      Some("http://app.example.com/auth/callback")
-    )
-    assertEquals(GoogleOAuth.redirectUri(None, None), None)
-    assertEquals(GoogleOAuth.redirectUri(Some("  "), Some("https")), None)
+  test("validates and normalizes the configured public base URL"):
+    assertEquals(AppConfig.validatePublicBaseUrl("http://localhost:8888/"), Right("http://localhost:8888"))
+    assertEquals(AppConfig.validatePublicBaseUrl("http://127.0.0.1:8888"), Right("http://127.0.0.1:8888"))
+    assertEquals(AppConfig.validatePublicBaseUrl("http://[::1]:8888"), Right("http://[::1]:8888"))
+    assertEquals(AppConfig.validatePublicBaseUrl("https://APP.EXAMPLE.COM:8443"), Right("https://app.example.com:8443"))
+
+  test("rejects unsafe or ambiguous public base URLs"):
+    Seq(
+      "http://app.example.com",
+      "https://user@app.example.com",
+      "https://app.example.com/base",
+      "https://app.example.com?query=yes",
+      "https://app.example.com#fragment",
+      "https://app.example.com:0",
+      "app.example.com"
+    ).foreach(value => assert(AppConfig.validatePublicBaseUrl(value).isLeft, value))
 
   test("builds the Google authorization URL with encoded parameters"):
     val url = GoogleOAuth.authorizationUrl("client-1", "http://localhost:8888/auth/callback", "state/value")
@@ -50,6 +56,7 @@ class AuthSuite extends munit.FunSuite:
     val configuration = AppConfig.fromEnvironment(Map(
       "GOOGLE_OAUTH_CLIENT_ID" -> " client-id ",
       "GOOGLE_OAUTH_CLIENT_SECRET" -> " client-secret ",
+      "PUBLIC_BASE_URL" -> " https://app.example.com/ ",
       "GCP_PROJECT_ID" -> " project-id ",
       "FIRESTORE_DATABASE_ID" -> " database-id ",
       "FIRESTORE_LOCATION" -> " location "
@@ -57,8 +64,19 @@ class AuthSuite extends munit.FunSuite:
 
     assertEquals(
       configuration,
-      Right(AppConfig(OAuthConfig("client-id", "client-secret"), FirestoreConfig("project-id", "database-id", "location")))
+      Right(AppConfig(
+        OAuthConfig("client-id", "client-secret", "https://app.example.com"),
+        FirestoreConfig("project-id", "database-id", "location")
+      ))
     )
+
+  test("requires the public base URL"):
+    val error = AppConfig.fromEnvironment(Map(
+      "GOOGLE_OAUTH_CLIENT_ID" -> "client-id",
+      "GOOGLE_OAUTH_CLIENT_SECRET" -> "client-secret"
+    )).left.toOption.get
+
+    assertEquals(error.getMessage, "Environment variable PUBLIC_BASE_URL is not set or is empty; see prod.env")
 
   test("parses GOOGLE_SERVICES as a trimmed, comma-separated scope list"):
     assertEquals(AppConfig.googleServices(Map.empty), Seq.empty)

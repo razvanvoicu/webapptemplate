@@ -30,16 +30,13 @@ object Callback extends BackendPlugin:
         code <- ZIO.fromOption(request.queryParam("code").filter(_.nonEmpty)).orElseFail(new IllegalArgumentException(
             request.queryParam("error").fold("The callback carries no authorization code")(e => s"Google reported: $e")
           ))
-        callbackUri <- ZIO
-          .fromOption(GoogleOAuth.redirectUri(request.rawHeader("Host"), request.rawHeader("X-Forwarded-Proto")))
-          .orElseFail(new IllegalArgumentException("The request carries no Host header"))
-        authentication <- GoogleOAuth.authenticate(code, callbackUri)
+        authentication <- GoogleOAuth.authenticate(code)
         now <- Clock.instant
         expiry = now.plus(sessionLifetime)
         sessionKey <- TokenGenerator.generate(32)
         _ <- SessionStore.create(sessionKey, authentication.user, now, expiry, authentication.refreshToken)
         _ <- ZIO.logInfo(s"Created browser session for ${authentication.user.email}")
-        secure = callbackUri.startsWith("https")
+        secure <- GoogleOAuth.callbackIsSecure
         cookie = sessionCookie(sessionKey, secure)
       yield Response.redirect(URL.root).addCookie(cookie).addCookie(clearedStateCookie(secure))
     login.catchAll: error =>

@@ -8,6 +8,7 @@ val repositoryDir          = file(".").getCanonicalFile
 val localConfigDir         = repositoryDir / ".local"
 val oauthConfigPathPrefix  = "OAUTHCONFIGPATH="
 val adminPasswordPathPrefix = "ADMINPASSWORDPATH="
+val publicBaseUrlPrefix     = "PUBLIC_BASE_URL="
 
 // The Google OAuth "Web application" JSON downloaded from Google Cloud; must contain web.client_id and
 // web.client_secret. Merely loading the build fails if its compulsory .local pointer or target file is absent.
@@ -415,6 +416,9 @@ lazy val root = {
       log.success(s"Rendered README.rst to ${outputDir / "README.html"}")
     },
     deploymentArtifact := Def.taskDyn {
+      val deploymentEnv = PublicBaseUrlBuild.configEnv(
+        LocalConfigBuild.requiredValue(localConfigDir, publicBaseUrlPrefix)
+      )
       clean.value
       Def.task {
         val log         = streams.value.log
@@ -432,8 +436,9 @@ lazy val root = {
         if (duplicateJarNames.nonEmpty)
           sys.error(s"Runtime dependency filename collision: ${duplicateJarNames.mkString(", ")}")
 
-        val secretEnv = OAuthBuild.configEnv(oauthConfigFile) ++
-          (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv)
+        val generatedEnv = OAuthBuild.configEnv(oauthConfigFile) ++
+          (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv) ++
+          deploymentEnv
 
         // Stage the Docker build context: app.jar, lib/*.jar, a secret-bearing prod.env, runApp (the image's
         // entrypoint), the Dockerfile itself, and (if available) local ADC for testing outside a GCP platform's
@@ -447,7 +452,7 @@ lazy val root = {
 
         val sourceEnv = resources / "prod.env"
         if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
-        val envLines = IO.readLines(sourceEnv) ++ OAuthBuild.envLines(secretEnv)
+        val envLines = IO.readLines(sourceEnv) ++ OAuthBuild.envLines(generatedEnv)
         // Explicit "\n" rather than IO.writeLines (which joins with the platform line separator, i.e. "\r\n"
         // when this task runs on Windows): prod.env is `.`-sourced by the POSIX runApp script regardless of
         // which OS built it, and a CRLF-corrupted value there isn't caught by this app's own defensive

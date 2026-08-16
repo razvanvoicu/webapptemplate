@@ -157,9 +157,10 @@ class RouteDiscoverySuite extends munit.FunSuite:
           Option.when(sessionKey == "session-key")(user)
 
     val googleOAuth: GoogleOAuth = new GoogleOAuth:
-      override def authorizationUrl(redirectUri: String, state: String): UIO[String] = ZIO.succeed("")
-      override def authenticate(code: String, redirectUri: String): Task[GoogleAuthentication] =
+      override def authorizationUrl(state: String): UIO[String] = ZIO.succeed("")
+      override def authenticate(code: String): Task[GoogleAuthentication] =
         ZIO.fail(new UnsupportedOperationException)
+      override def callbackIsSecure: UIO[Boolean] = ZIO.succeed(true)
       override def accessToken(refreshToken: String): Task[String] =
         ZIO.fail(new AssertionError("Sheets must reject the missing refresh token before requesting an access token"))
 

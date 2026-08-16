@@ -41,7 +41,7 @@ object OAuthBuild {
   def envLines(values: Map[String, String]): Seq[String] =
     values.toSeq.sortBy(_._1).map { case (key, value) =>
       if (value.exists(character => character == '\r' || character == '\n'))
-        sys.error(s"OAuth value $key contains a line break and cannot be written to prod.env")
+        sys.error(s"Environment value $key contains a line break and cannot be written to prod.env")
       s"$key=$value"
     }
 }

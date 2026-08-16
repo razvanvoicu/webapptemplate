@@ -5,12 +5,13 @@ import java.lang.management.ManagementFactory
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.TimeUnit
-import sgrv.be.BackendCapabilities
-import sgrv.be.auth.SessionStore
-import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 import scala.jdk.CollectionConverters.*
 import zio.{IO, Task, UIO, ZIO}
 import zio.http.{Header, Method, Response, Routes, handler}
+
+import sgrv.be.BackendCapabilities
+import sgrv.be.auth.SessionStore
+import sgrv.be.core.{AccessPolicy, BackendPlugin, CapabilitySet, RequestContext}
 
 /** Sensitive diagnostics supplied as an independently packaged backend plugin.
  *  This allows the inspection of a prospective production environment in the cloud,

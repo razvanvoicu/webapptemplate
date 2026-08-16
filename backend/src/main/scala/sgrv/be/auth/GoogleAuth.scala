@@ -17,20 +17,23 @@ final case class GoogleAuthentication(user: SessionUser, refreshToken: Option[St
 
 /** ZIO boundary around the Google OAuth client library. */
 trait GoogleOAuth:
-  def authorizationUrl(redirectUri: String, state: String): UIO[String]
-  def authenticate(code: String, redirectUri: String): Task[GoogleAuthentication]
+  def authorizationUrl(state: String): UIO[String]
+  def authenticate(code: String): Task[GoogleAuthentication]
+  def callbackIsSecure: UIO[Boolean]
   def accessToken(refreshToken: String): Task[String]
 
 private[be] object GoogleOAuth:
   private val authorizationEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
-  private val localHosts             = Set("localhost", "127.0.0.1", "[::1]")
   private val baseScopes              = Seq("openid", "email", "profile")
 
-  def authorizationUrl(redirectUri: String, state: String): ZIO[GoogleOAuth, Nothing, String] =
-    ZIO.serviceWithZIO[GoogleOAuth](_.authorizationUrl(redirectUri, state))
+  def authorizationUrl(state: String): ZIO[GoogleOAuth, Nothing, String] =
+    ZIO.serviceWithZIO[GoogleOAuth](_.authorizationUrl(state))
 
-  def authenticate(code: String, redirectUri: String): ZIO[GoogleOAuth, Throwable, GoogleAuthentication] =
-    ZIO.serviceWithZIO[GoogleOAuth](_.authenticate(code, redirectUri))
+  def authenticate(code: String): ZIO[GoogleOAuth, Throwable, GoogleAuthentication] =
+    ZIO.serviceWithZIO[GoogleOAuth](_.authenticate(code))
+
+  def callbackIsSecure: ZIO[GoogleOAuth, Nothing, Boolean] =
+    ZIO.serviceWithZIO[GoogleOAuth](_.callbackIsSecure)
 
   /** Exchanges a stored OAuth refresh token for a fresh, short-lived access token, used by backend routes acting
     * on Google APIs (e.g. Sheets/Drive) on behalf of a signed-in session.
@@ -51,10 +54,10 @@ private[be] object GoogleOAuth:
       extends GoogleOAuth:
     private val jsonFactory = GsonFactory.getDefaultInstance
 
-    override def authorizationUrl(redirectUri: String, state: String): UIO[String] =
-      ZIO.succeed(GoogleOAuth.authorizationUrl(config.clientId, redirectUri, state, googleServices))
+    override def authorizationUrl(state: String): UIO[String] =
+      ZIO.succeed(GoogleOAuth.authorizationUrl(config.clientId, config.callbackUri, state, googleServices))
 
-    override def authenticate(code: String, redirectUri: String): Task[GoogleAuthentication] =
+    override def authenticate(code: String): Task[GoogleAuthentication] =
       ZIO.attemptBlocking:
         val tokenResponse = new GoogleAuthorizationCodeTokenRequest(
           transport,
@@ -62,7 +65,7 @@ private[be] object GoogleOAuth:
           config.clientId,
           config.clientSecret,
           code,
-          redirectUri
+          config.callbackUri
         ).execute()
         val verifier = new GoogleIdTokenVerifier.Builder(transport, jsonFactory)
           .setAudience(java.util.List.of(config.clientId))
@@ -78,6 +81,8 @@ private[be] object GoogleOAuth:
         val refreshToken = Option(tokenResponse.getRefreshToken).map(_.trim).filter(_.nonEmpty)
         GoogleAuthentication(user, refreshToken)
 
+    override def callbackIsSecure: UIO[Boolean] = ZIO.succeed(config.callbackIsSecure)
+
     override def accessToken(refreshToken: String): Task[String] =
       ZIO.attemptBlocking:
         val tokenResponse =
@@ -85,14 +90,6 @@ private[be] object GoogleOAuth:
             .execute()
         Option(tokenResponse.getAccessToken).map(_.trim).filter(_.nonEmpty)
           .getOrElse(throw new IllegalStateException("Google returned no access token for the stored refresh token"))
-
-  private[auth] def redirectUri(host: Option[String], forwardedProto: Option[String]): Option[String] =
-    host.map(_.trim).filter(_.nonEmpty).map:
-      hostAndPort => s"${scheme(hostAndPort, forwardedProto)}://$hostAndPort/auth/callback"
-
-  private def scheme(hostAndPort: String, forwardedProto: Option[String]): String =
-    forwardedProto.map(_.trim.toLowerCase).filter(Set("http", "https")).getOrElse:
-      if localHosts.contains(hostAndPort.takeWhile(_ != ':').toLowerCase) then "http" else "https"
 
   private[auth] def authorizationUrl(
       clientId: String,

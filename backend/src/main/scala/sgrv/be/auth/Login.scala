@@ -14,23 +14,21 @@ object Login extends BackendPlugin:
     CapabilitySet.one(BackendCapabilities.googleOAuth) ++ CapabilitySet.one(BackendCapabilities.tokenGenerator)
   override val accessPolicy: AccessPolicy[Requires] = AccessPolicy.Public
   override val routes: Routes[Requires & RequestContext, Nothing] =
-    Routes(Method.GET / "auth" / "login" -> handler((request: Request) => apply(request)))
+    Routes(Method.GET / "auth" / "login" -> handler((_: Request) => apply))
 
   private[auth] val stateCookieName = "auth_state"
   private[auth] val cookiePath      = Path.root / "auth"
 
-  private def apply(request: Request): ZIO[Requires, Nothing, Response] =
+  private def apply: ZIO[Requires, Nothing, Response] =
     val redirect =
       for
-        callbackUri <- ZIO
-          .fromOption(GoogleOAuth.redirectUri(request.rawHeader("Host"), request.rawHeader("X-Forwarded-Proto")))
-          .orElseFail(new IllegalArgumentException("The request carries no Host header"))
-        state  <- TokenGenerator.generate(32)
-        target <- GoogleOAuth.authorizationUrl(callbackUri, state)
-        url    <- ZIO.fromEither(URL.decode(target))
+        state          <- TokenGenerator.generate(32)
+        target         <- GoogleOAuth.authorizationUrl(state)
+        callbackSecure <- GoogleOAuth.callbackIsSecure
+        url            <- ZIO.fromEither(URL.decode(target))
       yield Response
         .redirect(url)
-        .addCookie(stateCookie(state, secure = callbackUri.startsWith("https")))
+        .addCookie(stateCookie(state, secure = callbackSecure))
     redirect.catchAll: error =>
       ZIO.logWarning(s"Google login could not start: ${error.getMessage}") *>
         ZIO.succeed(Response.text("Login is currently unavailable.").status(Status.ServiceUnavailable))
