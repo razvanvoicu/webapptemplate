@@ -646,8 +646,12 @@ Docker/BuildKit cross-builds via emulation as needed, so nothing else has to cha
 build (and a container started from a foreign-platform image runs under emulation too, noticeably slower to
 start than a native one) but produces a correct image either way.
 
-The image's ``ENTRYPOINT`` runs ``runApp`` (the same launcher used before this template moved to Docker-only
-packaging), which loads ``prod.env`` before starting ``sgrv.be.Main``.
+The image declares ``SIGTERM`` as its stop signal and its exec-form ``ENTRYPOINT`` runs ``runApp``. After loading
+``prod.env``, that launcher uses ``exec java`` so the JVM replaces the shell and runs as PID 1. Docker or a
+container orchestrator can therefore deliver ``SIGTERM`` directly to ZIO's shutdown hook instead of relying on
+a shell to forward it. The hook interrupts the HTTP server, which stops normally and gives in-flight requests up
+to eight seconds to complete; the whole ZIO application has a nine-second shutdown budget. Configure the
+container runtime to allow at least that long before escalating to ``SIGKILL``.
 
 The HTTP server binds to ``BIND_ADDRESS`` (``127.0.0.1`` if unset) — a process bound only to loopback is
 unreachable from outside a container regardless of published ports, so the ``Dockerfile`` sets
@@ -806,4 +810,3 @@ worked examples of the shapes a new route is likely to take:
   ...), add its scope(s) to ``GOOGLE_SERVICES``, bundle an adapter like ``SheetsClient`` in the plugin, require
   ``BackendCapabilities.httpClient``, and construct the adapter inside the plugin. No API-specific service is
   added to ``BackendEnvironment`` or ``Main``.
-

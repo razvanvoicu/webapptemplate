@@ -8,6 +8,8 @@ import zio.logging.*
 
 private[be] object Config:
   val defaultPort = 8888
+  val serverShutdownTimeout = 8.seconds
+  val processShutdownTimeout = 9.seconds
   final case class InvalidPort(source: String, value: String)
       extends IllegalArgumentException(
         s"Invalid port configuration from $source: '$value'. Expected an integer from 1 to 65535."
@@ -41,6 +43,7 @@ object Main extends ZIOAppDefault:
   import Status.{NotFound, InternalServerError}
 
   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] = Runtime.removeDefaultLoggers >>> consoleLogger(loggerConfig)
+  override val gracefulShutdownTimeout: Duration = processShutdownTimeout
 
   private[be] def asset(fName: String, mediaType: MediaType, cacheCtrl: CacheControl = staticCacheCtrl): UIO[Response] =
     val makeResponse: Option[Array[Byte]] => Response =
@@ -81,7 +84,8 @@ object Main extends ZIOAppDefault:
   private[be] def bindAddress(environmentValue: Option[String]): String =
     environmentValue.map(_.trim).filter(_.nonEmpty).getOrElse(defaultBindAddress)
 
-  private[be] def serverConfig(host: String, port: Int): Server.Config = Server.Config.default.binding(host, port)
+  private[be] def serverConfig(host: String, port: Int): Server.Config =
+    Server.Config.default.binding(host, port).gracefulShutdownTimeout(serverShutdownTimeout)
 
   private type Layer = BackendEnvironment & DatabaseAdmin
   private val backendLayer: ZLayer[Any, Throwable, Layer] =
@@ -111,6 +115,11 @@ object Main extends ZIOAppDefault:
       _ <- ZIO.logInfo(s"Serving on http://$host:$p/")
       _ <- Server
         .serve(applicationRoutes @@ HandlerAspect.requestLogging())
+        .onInterrupt(
+          ZIO.logInfo(
+            s"Shutdown requested; active HTTP requests have up to ${serverShutdownTimeout.render} to complete"
+          )
+        )
         .provide(Server.defaultWith(_ => serverConfig(host, p)))
     yield ()
     unit.provideSome[ZIOAppArgs](backendLayer)

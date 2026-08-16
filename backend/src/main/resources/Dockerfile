@@ -26,4 +26,7 @@ ENV BIND_ADDRESS=0.0.0.0
 
 EXPOSE 8888
 
-ENTRYPOINT ["./runApp"]
+# Docker sends this directly to the JVM: the exec-form entrypoint starts runApp without an intermediate Docker
+# shell, and runApp replaces itself with Java after loading prod.env.
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/app/runApp"]

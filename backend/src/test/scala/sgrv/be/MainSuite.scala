@@ -1,5 +1,6 @@
 package sgrv.be
 
+import java.nio.charset.StandardCharsets.UTF_8
 import zio.{Chunk, Runtime, Task, Unsafe, ZIO}
 import zio.http.{Header, MediaType, Request, Status, URL}
 
@@ -10,11 +11,27 @@ class MainSuite extends munit.FunSuite:
       Runtime.default.unsafe.run(effect).getOrThrowFiberFailure()
     }
 
+  private def resourceText(name: String): String =
+    val input = Option(getClass.getClassLoader.getResourceAsStream(name)).getOrElse(fail(s"Missing resource: $name"))
+    try String(input.readAllBytes(), UTF_8)
+    finally input.close()
+
   test("binds the HTTP server to a given host and port"):
-    val address = Main.serverConfig("0.0.0.0", 9000).address
+    val config = Main.serverConfig("0.0.0.0", 9000)
+    val address = config.address
 
     assertEquals(address.getAddress.getHostAddress, "0.0.0.0")
     assertEquals(address.getPort, 9000)
+    assertEquals(config.gracefulShutdownTimeout, Config.serverShutdownTimeout)
+    assertEquals(Main.gracefulShutdownTimeout, Config.processShutdownTimeout)
+
+  test("delivers the container SIGTERM directly to Java as PID 1"):
+    val dockerfile = resourceText("Dockerfile")
+    val launcher = resourceText("runApp")
+
+    assert(dockerfile.linesIterator.exists(_.trim == "STOPSIGNAL SIGTERM"))
+    assert(dockerfile.linesIterator.exists(_.trim == "ENTRYPOINT [\"/app/runApp\"]"))
+    assert(launcher.linesIterator.exists(_.trim.startsWith("exec java ")))
 
   test("selects a valid port from arguments, environment, or the default"):
     assertEquals(Main.port(Chunk("9000"), Some("7000")), Right(9000))
