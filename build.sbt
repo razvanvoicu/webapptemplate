@@ -17,10 +17,10 @@ val publicBaseUrlPrefix = "PUBLIC_BASE_URL="
 val oauthConfigFile: File =
   LocalConfigBuild.requiredPath(localConfigDir, oauthConfigPathPrefix, repositoryDir)
 
-// gcloud's own well-known Application Default Credentials location, baked into the Docker image (only) so
-// `docker run` can reach Firestore/Sheets outside a GCP platform's own workload identity. Generate it with
-// `gcloud auth application-default login`. Optional: if missing, the Docker image is still built, but the
-// container will need credentials supplied another way (e.g. running on Cloud Run/GKE/GCE, or a mounted file).
+// gcloud's own well-known Application Default Credentials location, baked into the standalone `artifact` image
+// (only) so `docker run` can reach Firestore/Sheets outside a GCP platform's own workload identity. The Cloud Run
+// image never includes this file. Generate it with `gcloud auth application-default login`. Optional: if missing,
+// the standalone image is still built, but the container will need credentials supplied another way.
 val adcFile = file(
   if (sys.props("os.name").toLowerCase.contains("win"))
     s"${sys.env.getOrElse("APPDATA", "")}/gcloud/application_default_credentials.json"
@@ -31,6 +31,12 @@ val adcFile = file(
 // TEMPLATE SETTING: the target platform for the Docker image, independent of the machine running `sbt artifact`
 // (e.g. building on Apple Silicon for an amd64 deployment host). BuildKit cross-builds via emulation as needed.
 val dockerPlatform = "linux/amd64"
+
+// TEMPLATE SETTINGS: the managed Cloud Run target and its private Artifact Registry repository.
+val gcloudProject = "apps-416208"
+val gcloudRegion = "asia-southeast1"
+val artifactRegistry = s"$gcloudRegion-docker.pkg.dev/$gcloudProject/apps"
+val gcloudServiceAccount = s"webapptemplate-runner@$gcloudProject.iam.gserviceaccount.com"
 
 // TEMPLATE SETTING: where Chrome lives, for `e2etest/launchTestBrowser`'s visible, remote-debuggable instance —
 // used to sign in to Google manually once and reuse that session in an authenticated E2E run, since Google
@@ -49,6 +55,9 @@ val chromeExecutable = file(
 val testBrowserDebugPort = 9222
 
 lazy val deploymentArtifact = taskKey[Unit]("Build the backend's Docker image")
+lazy val deployGCloud = taskKey[Unit](
+  "Build a secret-free image, push it to Artifact Registry, and deploy it to Google Cloud Run"
+)
 
 lazy val launchTestBrowser = taskKey[Unit](
   "Launch the Firestore emulator, the coverage-instrumented backend, and a visible, remote-debuggable Chrome " +
@@ -141,6 +150,64 @@ def parseEnvFile(file: File): Map[String, String] =
         }
       }
       .toMap
+
+// Builds the context shared by standalone and Cloud Run images. Only explicitly supplied generatedEnv values
+// and the optional ADC file enter the context, making the Cloud Run caller able to guarantee a secret-free image.
+def stageDockerContext(
+    appJar: File,
+    runtimeJars: Seq[File],
+    resources: File,
+    dockerDir: File,
+    generatedEnv: Map[String, String],
+    includedAdc: Option[File]
+): Unit = {
+  val duplicateJarNames = runtimeJars.groupBy(_.getName).collect {
+    case (jarName, jars) if jars.size > 1 => jarName
+  }
+  if (duplicateJarNames.nonEmpty)
+    sys.error(s"Runtime dependency filename collision: ${duplicateJarNames.mkString(", ")}")
+
+  IO.delete(dockerDir)
+  IO.createDirectory(dockerDir / "lib")
+  IO.createDirectory(dockerDir / "adc")
+  IO.copyFile(appJar, dockerDir / "app.jar")
+  runtimeJars.foreach(jar => IO.copyFile(jar, dockerDir / "lib" / jar.getName))
+
+  val sourceEnv = resources / "prod.env"
+  if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
+  val envLines = IO.readLines(sourceEnv) ++ OAuthBuild.envLines(generatedEnv)
+  // Explicit "\n" rather than IO.writeLines: prod.env is sourced by a POSIX shell even when built on Windows.
+  IO.write(dockerDir / "prod.env", envLines.map(_ + "\n").mkString)
+
+  Seq("runApp", "Dockerfile").foreach { fileName =>
+    val source = resources / fileName
+    if (!source.isFile) sys.error(s"Missing packaging resource: ${source.getAbsolutePath}")
+    IO.copyFile(source, dockerDir / fileName)
+  }
+
+  includedAdc.foreach(file => IO.copyFile(file, dockerDir / "adc" / "application_default_credentials.json"))
+}
+
+def cloudRunEnvYaml(values: Map[String, String]): String =
+  values.toSeq
+    .sortBy(_._1)
+    .map { case (key, value) =>
+      if (!key.matches("[A-Z_][A-Z0-9_]*")) sys.error(s"Invalid Cloud Run environment variable name: $key")
+      if (value.exists(character => character == '\r' || character == '\n'))
+        sys.error(s"Cloud Run environment value $key contains a line break")
+      s"$key: '${value.replace("'", "''")}'\n"
+    }
+    .mkString
+
+def runCommand(command: Seq[String], workingDirectory: File, description: String): Unit = {
+  val exitCode =
+    try sys.process.Process(command, workingDirectory).!
+    catch {
+      case _: java.io.IOException =>
+        sys.error(s"Could not run ${command.head} while $description; ensure it is installed and on PATH.")
+    }
+  if (exitCode != 0) sys.error(s"Failed while $description (exit code $exitCode)")
+}
 
 // True if something is already accepting connections on host:port. Used both so the e2etest suite doesn't
 // silently test against a stray leftover process on the backend's port, and so `launchTestBrowser` can detect
@@ -465,18 +532,13 @@ lazy val root = {
         Def.task {
           val log = streams.value.log
           val appJar = (backend / Compile / packageBin).value
+          val sharedJar = (sharedJVM / Compile / packageBin).value
           val debugJars = (backend / optionalDebugPluginJar).value.toSeq
           val runtimeJars = (
-            (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile) ++ debugJars
+            (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile) ++ Seq(sharedJar) ++ debugJars
           ).distinct
           val resources = (backend / Compile / resourceDirectory).value
           val outputDir = (backend / Compile / target).value
-
-          val duplicateJarNames = runtimeJars.groupBy(_.getName).collect {
-            case (jarName, jars) if jars.size > 1 => jarName
-          }
-          if (duplicateJarNames.nonEmpty)
-            sys.error(s"Runtime dependency filename collision: ${duplicateJarNames.mkString(", ")}")
 
           val generatedEnv = OAuthBuild.configEnv(oauthConfigFile) ++
             (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv) ++
@@ -486,30 +548,15 @@ lazy val root = {
           // entrypoint), the Dockerfile itself, and (if available) local ADC for testing outside a GCP platform's
           // own workload identity.
           val dockerDir = outputDir / "docker"
-          IO.delete(dockerDir)
-          IO.createDirectory(dockerDir / "lib")
-          IO.createDirectory(dockerDir / "adc")
-          IO.copyFile(appJar, dockerDir / "app.jar")
-          runtimeJars.foreach(jar => IO.copyFile(jar, dockerDir / "lib" / jar.getName))
-
-          val sourceEnv = resources / "prod.env"
-          if (!sourceEnv.isFile) sys.error(s"Missing packaging resource: ${sourceEnv.getAbsolutePath}")
-          val envLines = IO.readLines(sourceEnv) ++ OAuthBuild.envLines(generatedEnv)
-          // Explicit "\n" rather than IO.writeLines (which joins with the platform line separator, i.e. "\r\n"
-          // when this task runs on Windows): prod.env is `.`-sourced by the POSIX runApp script regardless of
-          // which OS built it, and a CRLF-corrupted value there isn't caught by this app's own defensive
-          // trimming for every variable (PORT notably isn't trimmed before being parsed as an integer).
-          IO.write(dockerDir / "prod.env", envLines.map(_ + "\n").mkString)
-
-          Seq("runApp", "Dockerfile").foreach { fileName =>
-            val source = resources / fileName
-            if (!source.isFile) sys.error(s"Missing packaging resource: ${source.getAbsolutePath}")
-            IO.copyFile(source, dockerDir / fileName)
-          }
-
-          if (adcFile.isFile)
-            IO.copyFile(adcFile, dockerDir / "adc" / "application_default_credentials.json")
-          else
+          stageDockerContext(
+            appJar,
+            runtimeJars,
+            resources,
+            dockerDir,
+            generatedEnv,
+            if (adcFile.isFile) Some(adcFile) else None
+          )
+          if (!adcFile.isFile)
             log.warn(
               s"No Application Default Credentials found at ${adcFile.getAbsolutePath}; building the Docker image " +
                 "without them. Run `gcloud auth application-default login` first, or supply credentials to the " +
@@ -528,9 +575,82 @@ lazy val root = {
             s"${name.value}:latest",
             "."
           )
-          val exitCode = sys.process.Process(dockerBuildArgs, dockerDir).!
-          if (exitCode != 0) sys.error(s"docker build failed for $imageTag (exit code $exitCode)")
+          runCommand(dockerBuildArgs, dockerDir, s"building Docker image $imageTag")
           log.success(s"Built Docker image for $dockerPlatform: $imageTag (and ${name.value}:latest)")
+        }
+      }.value,
+      deployGCloud := Def.taskDyn {
+        val deploymentEnv = PublicBaseUrlBuild.configEnv(
+          LocalConfigBuild.requiredValue(localConfigDir, publicBaseUrlPrefix)
+        )
+        clean.value
+        Def.task {
+          val log = streams.value.log
+          val appJar = (backend / Compile / packageBin).value
+          val sharedJar = (sharedJVM / Compile / packageBin).value
+          val debugJars = (backend / optionalDebugPluginJar).value.toSeq
+          val runtimeJars = (
+            (backend / Runtime / dependencyClasspath).value.map(_.data).filter(_.isFile) ++ Seq(sharedJar) ++ debugJars
+          ).distinct
+          val resources = (backend / Compile / resourceDirectory).value
+          val outputDir = (backend / Compile / target).value
+
+          // OAuth and optional Debug credentials are required by the running service, but stay outside the
+          // Docker context. Cloud Run receives them while creating the revision; local ADC is omitted entirely
+          // so Google client libraries use the service's workload identity.
+          val runtimeEnv = OAuthBuild.configEnv(oauthConfigFile) ++
+            (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv) ++
+            deploymentEnv
+
+          val dockerDir = outputDir / "docker-gcloud"
+          stageDockerContext(appJar, runtimeJars, resources, dockerDir, Map.empty, None)
+
+          val serviceName = name.value
+          val remoteImage = s"$artifactRegistry/$serviceName:${version.value}"
+          val registryHost = s"$gcloudRegion-docker.pkg.dev"
+
+          runCommand(
+            Seq("gcloud", "auth", "configure-docker", registryHost, "--quiet"),
+            repositoryDir,
+            s"configuring Docker authentication for $registryHost"
+          )
+          runCommand(
+            Seq("docker", "build", "--platform", dockerPlatform, "-t", remoteImage, "."),
+            dockerDir,
+            s"building secret-free Cloud Run image $remoteImage"
+          )
+          runCommand(Seq("docker", "push", remoteImage), repositoryDir, s"pushing $remoteImage")
+
+          val envFile = java.nio.file.Files.createTempFile(s"$serviceName-cloud-run-", ".yaml").toFile
+          try {
+            IO.write(envFile, cloudRunEnvYaml(runtimeEnv))
+            runCommand(
+              Seq(
+                "gcloud",
+                "run",
+                "deploy",
+                serviceName,
+                "--image",
+                remoteImage,
+                "--project",
+                gcloudProject,
+                "--region",
+                gcloudRegion,
+                "--service-account",
+                gcloudServiceAccount,
+                "--port",
+                "8080",
+                "--allow-unauthenticated",
+                "--env-vars-file",
+                envFile.getAbsolutePath,
+                "--quiet"
+              ),
+              repositoryDir,
+              s"deploying Cloud Run service $serviceName"
+            )
+          } finally IO.delete(envFile)
+
+          log.success(s"Deployed $remoteImage to Cloud Run service $serviceName in $gcloudRegion")
         }
       }.value
     )

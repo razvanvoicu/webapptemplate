@@ -164,13 +164,13 @@ and contain ``web.client_id`` and ``web.client_secret``. For ``sbt run``, the bu
 ``test.env`` without modifying that tracked file. For ``sbt artifact``, it appends the same values only to the
 generated ``prod.env`` staged into the Docker build context; the source ``prod.env`` remains secret-free. The
 resulting Docker image therefore contains a client secret and must be handled as a secret-bearing artifact (see
-`Packaging and deployment`_). The optional admin-password pointer uses the same mechanism and is described in
-`Admin-protected routes`_.
+`Packaging and deployment`_). ``sbt deployGCloud`` instead supplies the values to the Cloud Run revision and
+keeps them out of its image. The optional admin-password pointer follows the corresponding mechanism and is
+described in `Admin-protected routes`_.
 
-The backend reads the OAuth client ID and secret directly from its environment;
-it does not copy them into Firestore. The external JSON is the local source of
-truth, while the generated ``prod.env`` copy is the source of truth inside the
-Docker image.
+The backend reads the OAuth client ID and secret directly from its environment; it does not copy them into
+Firestore. The external JSON is the local source of truth. A standalone artifact receives the values from its
+generated ``prod.env``; a Cloud Run revision receives them as runtime configuration.
 
 ``PUBLIC_BASE_URL`` is the externally visible origin of the running environment, without a path, query, or
 fragment. Committed ``test.env`` defines ``http://localhost:8888``; production values are injected only from
@@ -221,7 +221,7 @@ no code changes are needed between environments:
 * Locally, log in manually (outside the build) with
   ``gcloud auth application-default login
   --impersonate-service-account=<GCP_PROJECT_ID's Firestore service account>``.
-* On Cloud Run, deploy the service with that same service account.
+* On Cloud Run, give the service's runtime identity equivalent Firestore permissions.
 
 The public origin, GCP project, Firestore database ID, and location live in an env file (``PUBLIC_BASE_URL``,
 ``GCP_PROJECT_ID``, ``FIRESTORE_DATABASE_ID``, ``FIRESTORE_LOCATION``) rather than in Scala source. Which file
@@ -235,8 +235,11 @@ editing code:
   optional admin password, and locally configured production ``PUBLIC_BASE_URL`` to the generated ``prod.env``
   staged in the Docker build context. The source ``prod.env`` remains free of secrets and deployment addresses;
   the image's ``runApp`` launcher sources the generated copy at startup.
+* ``sbt deployGCloud`` builds from the same non-secret source ``prod.env`` without appending those values. It
+  supplies them to the Cloud Run revision at deployment time and relies on workload identity for Google
+  Application Default Credentials.
 
-Either way nothing needs to be set by hand at run time. On startup the backend checks for the Firestore database
+In every mode nothing needs to be set by hand at run time. On startup the backend checks for the Firestore database
 named ``FIRESTORE_DATABASE_ID`` and creates it in Native mode at ``FIRESTORE_LOCATION`` if it does not exist. A
 failed initialization is logged as a warning so the HTTP server can still start, but database-backed login and
 session checks cannot succeed until Firestore is available.
@@ -653,6 +656,41 @@ a shell to forward it. The hook interrupts the HTTP server, which stops normally
 to eight seconds to complete; the whole ZIO application has a nine-second shutdown budget. Configure the
 container runtime to allow at least that long before escalating to ``SIGKILL``.
 
+Google Cloud Run
+~~~~~~~~~~~~~~~~
+
+Deploy the application with:
+
+.. code-block:: console
+
+   sbt deployGCloud
+
+The task performs a clean build, creates a separate Cloud Run Docker context under
+``backend/target/docker-gcloud/``, authenticates Docker to Artifact Registry, pushes
+``asia-southeast1-docker.pkg.dev/apps-416208/apps/webapptemplate:<version>``, and deploys the public
+``webapptemplate`` service in ``asia-southeast1`` on port ``8080``. Docker and an authenticated ``gcloud`` CLI
+must be available locally. The deploying account needs permission to push to that repository and update Cloud
+Run. The task explicitly attaches ``webapptemplate-runner@apps-416208.iam.gserviceaccount.com`` as the service's
+runtime identity; that account separately needs the Firestore permissions used by the backend, and the deploying
+user needs ``roles/iam.serviceAccountUser`` on it.
+
+The staged runtime libraries include the packaged ``sharedJVM`` project explicitly. Inter-project sbt
+dependencies otherwise appear on the backend runtime classpath as class directories rather than JAR files and
+would be lost when assembling the Docker context.
+
+The Cloud Run image is deliberately secret-free. Its ``prod.env`` contains only the committed, non-secret GCP
+and Google-service settings, its ADC directory is empty, and OAuth/admin values never enter the Docker context.
+The OAuth client secret is still required by the running application to exchange authorization codes, so
+``deployGCloud`` supplies it—along with the client ID, selected ``PUBLIC_BASE_URL``, and optional Debug password—
+to the Cloud Run revision from a temporary YAML file that is deleted after the command finishes. Google API and
+Firestore calls use the Cloud Run service's workload identity instead of local ADC.
+
+As with ``sbt artifact``, the public origin comes from the active ``PUBLIC_BASE_URL=...`` file under ``.local/``.
+It must be the address through which browsers actually reach this Cloud Run deployment, and its exact
+``/auth/callback`` URL must be registered on the Google OAuth client. On the first deployment, ``gcloud`` reports
+the newly assigned service URL; register it, activate it as ``PUBLIC_BASE_URL``, and deploy again unless a custom
+domain was already selected.
+
 The HTTP server binds to ``BIND_ADDRESS`` (``127.0.0.1`` if unset) — a process bound only to loopback is
 unreachable from outside a container regardless of published ports, so the ``Dockerfile`` sets
 ``BIND_ADDRESS=0.0.0.0`` itself. Run the image with:
@@ -682,13 +720,12 @@ is empty. The image deliberately does not set ``GOOGLE_APPLICATION_CREDENTIALS``
 at gcloud's well-known path, while an absent file leaves ADC free to fall through to workload identity or another
 provider.
 
-This makes the Docker image itself a secret-bearing artifact, on top of the OAuth secret and any conditionally
-included admin password baked into its copy of ``prod.env``. Do not push it to a public registry; transfer it directly with
-``docker save``/``docker load``, or push to a private registry you control. A production deployment on
-Cloud Run/GKE/GCE doesn't need the baked-in credential at all and is arguably better off without it (workload
-identity rotates automatically; a baked-in file doesn't); this mechanism exists for the case of testing the
-exact image you're about to deploy, or running it on a host with no workload identity to rely on, such as a
-plain Linux VM behind your own reverse proxy.
+This makes the standalone ``sbt artifact`` image itself a secret-bearing artifact, on top of the OAuth secret and
+any conditionally included admin password baked into its copy of ``prod.env``. Do not push it to a public
+registry; transfer it directly with ``docker save``/``docker load``, or push to a private registry you control.
+``sbt deployGCloud`` deliberately builds a different, secret-free context for Artifact Registry. The standalone
+ADC mechanism exists for testing the exact local image or running it on a host with no workload identity, such
+as a plain Linux VM behind your own reverse proxy.
 
 Repository layout
 -----------------
@@ -754,8 +791,8 @@ What absolutely needs changing
      database/location you want created there.
    * ``GOOGLE_SERVICES`` — the scopes your fork's own routes need (see `Google service entitlements (Sheets)`_).
      Clear it if you don't call any Google API beyond login; keep or extend it if you do.
-   * ``PORT`` can stay as-is; it is only a local-run default and is overridden by the ``PORT`` a platform like
-     Cloud Run injects.
+   * Leave ``PORT`` out of ``prod.env``. The backend defaults to ``8888`` for standalone containers, while Cloud
+     Run injects the port selected by ``deployGCloud``.
 
 4. **Optional Debug configuration** — if you keep the Debug plugin, create a fresh random password file outside
    source control and point to it with an ``ADMINPASSWORDPATH=...`` first line in a file under ``.local/`` (see

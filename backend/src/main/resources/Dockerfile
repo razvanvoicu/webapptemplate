@@ -1,9 +1,8 @@
-# Built by `sbt artifact` from a staging directory containing app.jar, lib/*.jar, prod.env, runApp, and an adc/
-# directory that optionally contains application_default_credentials.json for local testing outside GCP.
+# Built by `sbt artifact` or `sbt deployGCloud` from a staging directory containing app.jar, lib/*.jar, prod.env,
+# runApp, and an adc/ directory.
 #
-# SECURITY: the resulting image bakes in OAuth/admin secrets (via prod.env) and, if present, a Google Application
-# Default Credentials file. Treat the image itself as a secret-bearing artifact: do not push it to a public
-# registry.
+# SECURITY: the standalone artifact may contain OAuth/admin secrets and local ADC. The Cloud Run task supplies
+# an empty adc/ directory and keeps runtime secrets outside its Docker context, producing a secret-free image.
 FROM eclipse-temurin:21-jre-jammy
 
 WORKDIR /app
