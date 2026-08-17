@@ -32,6 +32,10 @@ Once signed in, a small form appears under the greeting exercising the Google Sh
 to find-or-create that spreadsheet in the signed-in user's Google Drive, append a row recording the request's
 server timestamp and the browser's User-Agent, and display the spreadsheet's current content in a table.
 
+An "About" link also appears in the upper-right corner after sign-in. It opens a centered modal and fetches the
+app version, UTC build timestamp, build operating system, Scala version, and Scala.js version from the
+authenticated ``GET /about`` route.
+
 The backend owns the static-file routes, but application API routes are not
 coupled to ``Main``. ``RouteDiscovery`` scans the ``sgrv.be`` package on the
 runtime classpath for objects implementing the nominal ``BackendPlugin`` interface. Each plugin returns native
@@ -48,7 +52,9 @@ from those generic facilities. Consequently, adding a plugin does not require ad
 The Scala.js linker runs as a backend resource generator. Its ``main.js`` and
 source map are copied into the backend's managed ``web`` resources beside the
 hand-written ``index.html`` and ``style.css`` files. Consequently, one backend
-build contains and serves the complete application.
+build contains and serves the complete application. A second resource generator captures the version, build
+timestamp, build OS, Scala version, and Scala.js plugin version in a packaged ``build-info.properties`` resource
+for ``/about``.
 
 Running locally
 ---------------
@@ -125,6 +131,9 @@ Routes and caching
    * - ``/me``
      - Signed-in user as JSON, or ``401``
      - ``no-store``
+   * - ``GET /about``
+     - Authenticated build metadata as JSON
+     - ``no-store``
    * - ``POST /sheets/upsert``
      - Finds/creates a named spreadsheet, appends a timestamp + User-Agent row; JSON ``{"spreadsheetId": ...}``
      - Default
@@ -135,8 +144,9 @@ Routes and caching
 Each plugin declares an ``AccessPolicy``; see `Adding a backend plugin`_. ``/auth/login``, ``/auth/callback``, and
 ``/me`` use ``AccessPolicy.Public`` because they must serve visitors without an existing session. When linked,
 the Debug plugin uses ``AuthenticatedAndAdminPassword``, so reaching ``/debug`` needs both a session and the
-admin password (`Admin-protected routes`_). The Sheets plugins use ``Authenticated`` and consume the resulting
-authenticated request context to reach the signed-in user's stored Google refresh token
+admin password (`Admin-protected routes`_). The About and Sheets plugins use ``Authenticated``; About reports
+packaged build metadata, while Sheets consumes the resulting authenticated request context to reach the signed-in
+user's stored Google refresh token
 (`Google service entitlements (Sheets)`_). Static routes
 (``/``, ``/index.html``, ``/style.css``, ``/main.js``, ``/main.js.map``) are wired directly in ``Main`` and are
 reserved against dynamically loaded route conflicts.

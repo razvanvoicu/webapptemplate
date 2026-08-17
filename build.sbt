@@ -137,6 +137,31 @@ lazy val frontendAssets = Def.task {
   }
 }
 
+// Captures the toolchain and machine that produced this backend compilation. `artifact` and `deployGCloud` clean
+// before packaging, so their generated resource always records that deployment build rather than an older run.
+lazy val buildInformationResource = Def.task {
+  val output = (Compile / resourceManaged).value / "sgrv" / "be" / "about" / "build-info.properties"
+  val osName = sys.props.getOrElse("os.name", "Unknown")
+  val buildOs = osName.toLowerCase match {
+    case name if name.contains("win") => "Windows"
+    case name if name.contains("mac") => "Mac"
+    case _                            => osName
+  }
+  val scalaJsVersion = Option(org.scalajs.sbtplugin.ScalaJSPlugin.getClass.getPackage.getImplementationVersion)
+    .getOrElse(sys.error("Could not determine the Scala.js plugin version"))
+  val properties = Seq(
+    s"app.version=${version.value}",
+    s"build.date=${java.time.Instant.now()}",
+    s"build.os=$buildOs",
+    s"scala.version=${scalaVersion.value}",
+    s"scala.js.version=$scalaJsVersion"
+  )
+
+  IO.createDirectory(output.getParentFile)
+  IO.writeLines(output, properties)
+  Seq(output)
+}
+
 // Parses a `KEY=value` env file in the format shared by prod.env, test.env, and the runApp launcher, so any such
 // file can seed `sbt run`'s forked process without deployment identity living in the source.
 def parseEnvFile(file: File): Map[String, String] =
@@ -242,7 +267,7 @@ lazy val backend = (project in file("backend"))
       gson,
       munit % Test
     ),
-    Compile / resourceGenerators += frontendAssets.taskValue,
+    Compile / resourceGenerators ++= Seq(frontendAssets.taskValue, buildInformationResource.taskValue),
     run / fork := true,
     run / connectInput := true,
     // Some networks hand out AAAA (IPv6) records for googleapis.com without actually routing IPv6, which makes

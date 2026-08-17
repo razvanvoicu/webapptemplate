@@ -5,6 +5,7 @@ import org.openqa.selenium.chrome.{ChromeDriver, ChromeOptions}
 import org.openqa.selenium.support.ui.{ExpectedConditions, WebDriverWait}
 
 import java.time.{Duration, Instant}
+import scala.jdk.CollectionConverters.*
 
 /** Exercises the authenticated Sheets flow (create/update a spreadsheet, then read its rows back) against the real
   * backend, attaching to the visible Chrome instance `e2etest/launchTestBrowser` leaves running rather than launching a
@@ -26,6 +27,20 @@ class SampleSpreadsheetE2ESuite extends munit.FunSuite:
   // it does not close the real, user-owned browser window.
   override def afterAll(): Unit =
     if driver != null then driver.quit()
+
+  test("the About link opens authenticated build information in a modal"):
+    driver.get(baseUrl)
+    val wait = new WebDriverWait(driver, Duration.ofSeconds(20))
+
+    wait.until(ExpectedConditions.elementToBeClickable(By.cssSelector(".about-link"))).click()
+    val dialog = wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".about-dialog")))
+    val labels = dialog.findElements(By.cssSelector(".about-details dt")).asScala.map(_.getText).toSeq
+    val values = dialog.findElements(By.cssSelector(".about-details dd")).asScala.map(_.getText).toSeq
+
+    assertEquals(labels, Seq("App version", "Build date", "Build OS", "Scala version", "Scala.js version"))
+    assertEquals(values.size, labels.size)
+    values.foreach(value => assert(value.nonEmpty))
+    dialog.findElement(By.cssSelector(".about-close")).click()
 
   test("creating/updating the sample spreadsheet appends a fresh, readable row"):
     driver.get(baseUrl)

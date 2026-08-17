@@ -2,7 +2,7 @@ package sgrv.fe
 
 import com.raquo.laminar.api.L.*
 import org.scalajs.dom
-import sgrv.api.{CurrentUser, SpreadsheetContentResponse, UpsertSpreadsheetRequest}
+import sgrv.api.{AboutInfo, CurrentUser, SpreadsheetContentResponse, UpsertSpreadsheetRequest}
 import zio.json.*
 
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -25,6 +25,12 @@ object Main:
     case Loaded(rows: Seq[Seq[String]])
     case Failed(message: String)
 
+  private enum AboutState:
+    case Closed
+    case Loading
+    case Loaded(information: AboutInfo)
+    case Failed(message: String)
+
   import UserState.*
   import SheetState.*
 
@@ -32,6 +38,7 @@ object Main:
     val user = Var[UserState](Unknown)
     val sheetName = Var("")
     val sheetState = Var[SheetState](Idle)
+    val aboutState = Var[AboutState](AboutState.Closed)
 
     dom
       .fetch("/me")
@@ -57,9 +64,29 @@ object Main:
             case Failure(error) => sheetState.set(Failed(error.getMessage))
           }
 
+    def openAbout(): Unit =
+      aboutState.set(AboutState.Loading)
+      fetchAbout().onComplete:
+        case Success(information) if aboutState.now() == AboutState.Loading =>
+          aboutState.set(AboutState.Loaded(information))
+        case Failure(error) if aboutState.now() == AboutState.Loading =>
+          val message = Option(error.getMessage).map(_.trim).filter(_.nonEmpty).getOrElse("The request failed.")
+          aboutState.set(AboutState.Failed(message))
+        case _ => ()
+
     val app =
       div(
         cls := "app",
+        child <-- user.signal.map {
+          case SignedIn(_, _) =>
+            a(
+              cls := "about-link",
+              href := "/about",
+              onClick.preventDefault --> { _ => openAbout() },
+              "About"
+            )
+          case _ => emptyNode
+        },
         div(
           cls := "home",
           child <-- user.signal.map {
@@ -107,6 +134,50 @@ object Main:
               }
             )
           case _ => emptyNode
+        },
+        child <-- aboutState.signal.map {
+          case AboutState.Closed => emptyNode
+          case state             =>
+            val content = state match
+              case AboutState.Loading             => p(cls := "about-status", "Loading build information…")
+              case AboutState.Failed(message)     => p(cls := "error about-status", message)
+              case AboutState.Loaded(information) =>
+                dl(
+                  cls := "about-details",
+                  dt("App version"),
+                  dd(information.appVersion),
+                  dt("Build date"),
+                  dd(information.buildDate),
+                  dt("Build OS"),
+                  dd(information.buildOs),
+                  dt("Scala version"),
+                  dd(information.scalaVersion),
+                  dt("Scala.js version"),
+                  dd(information.scalaJsVersion)
+                )
+              case AboutState.Closed => emptyNode
+
+            div(
+              cls := "about-overlay",
+              onClick --> { _ => aboutState.set(AboutState.Closed) },
+              div(
+                cls := "about-dialog",
+                role := "dialog",
+                onClick --> { event => event.stopPropagation() },
+                div(
+                  cls := "about-header",
+                  h2("About"),
+                  button(
+                    cls := "about-close",
+                    typ := "button",
+                    title := "Close",
+                    onClick --> { _ => aboutState.set(AboutState.Closed) },
+                    "×"
+                  )
+                ),
+                content
+              )
+            )
         }
       )
 
@@ -139,6 +210,23 @@ object Main:
     dom.fetch(url, init).flatMap { response =>
       if response.ok then Future.successful(())
       else response.text().flatMap(text => Future.failed(new RuntimeException(s"${response.status}: $text")))
+    }
+
+  private def fetchAbout(): Future[AboutInfo] =
+    dom.fetch("/about").flatMap { response =>
+      if response.ok then
+        response
+          .text()
+          .flatMap: text =>
+            text
+              .fromJson[AboutInfo]
+              .fold(
+                details => Future.failed(new RuntimeException(s"The backend returned invalid About JSON: $details")),
+                Future.successful
+              )
+      else if response.status == 401 then
+        Future.failed(new RuntimeException("Your session has expired. Reload the page and sign in again."))
+      else Future.failed(new RuntimeException(s"The About request returned ${response.status}."))
     }
 
   private def fetchContent(name: String): Future[Seq[Seq[String]]] =
