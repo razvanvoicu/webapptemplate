@@ -33,10 +33,13 @@ class MainSuite extends munit.FunSuite:
     assert(dockerfile.linesIterator.exists(_.trim == "ENTRYPOINT [\"/app/runApp\"]"))
     assert(launcher.linesIterator.exists(_.trim.startsWith("exec java ")))
 
-  test("keeps the packaged production baseline free of injected runtime secrets and port overrides"):
+  test("keeps tracked environment baselines free of task-specific origins and injected runtime secrets"):
     val prodEnv = resourceText("prod.env").linesIterator.map(_.trim).filter(_.nonEmpty).toSeq
+    val testEnv = resourceText("test.env").linesIterator.map(_.trim).filter(_.nonEmpty).toSeq
     val deploymentOnlyKeys = Seq(
       "PORT=",
+      "LOCAL_BASE_URL=",
+      "ARTIFACT_BASE_URL=",
       "PUBLIC_BASE_URL=",
       "GOOGLE_OAUTH_CLIENT_ID=",
       "GOOGLE_OAUTH_CLIENT_SECRET=",
@@ -44,6 +47,9 @@ class MainSuite extends munit.FunSuite:
     )
 
     deploymentOnlyKeys.foreach(prefix => assert(!prodEnv.exists(_.startsWith(prefix)), s"Found $prefix in prod.env"))
+    Seq("LOCAL_BASE_URL=", "ARTIFACT_BASE_URL=", "PUBLIC_BASE_URL=").foreach(prefix =>
+      assert(!testEnv.exists(_.startsWith(prefix)), s"Found $prefix in test.env")
+    )
 
   test("selects a valid port from arguments, environment, or the default"):
     assertEquals(Main.port(Chunk("9000"), Some("7000")), Right(9000))

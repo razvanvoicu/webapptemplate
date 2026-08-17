@@ -3,12 +3,12 @@ import java.net.URI
 object PublicBaseUrlBuild {
   private val localHosts = Set("localhost", "127.0.0.1", "::1")
 
-  def configEnv(configuredValue: String): Map[String, String] =
-    Map("PUBLIC_BASE_URL" -> validate(configuredValue.trim))
+  def configEnv(configuredVariable: String, configuredValue: String): Map[String, String] =
+    Map("PUBLIC_BASE_URL" -> validate(configuredVariable.stripSuffix("="), configuredValue.trim))
 
-  private def validate(value: String): String = {
+  private def validate(configuredVariable: String, value: String): String = {
     def invalid(reason: String): Nothing =
-      sys.error(s"Configured PUBLIC_BASE_URL $reason")
+      sys.error(s"Configured $configuredVariable $reason")
 
     if (value.isEmpty) invalid("is empty")
 

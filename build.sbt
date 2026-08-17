@@ -3,13 +3,15 @@ import org.scalajs.linker.interface.ModuleKind
 import sbtcrossproject.CrossPlugin.autoImport.*
 import scalajscrossproject.ScalaJSCrossPlugin.autoImport.*
 
-// Local pointer files keep machine-specific secret locations outside source control. OAuth configuration is
-// compulsory; Debug remains opt-in. Each pointer must be the first line of exactly one regular file directly
-// under .local. Relative target paths are resolved from the repository root.
+// Local configuration keeps machine-specific paths and deployment origins outside source control. Every setting
+// is the first line of exactly one regular file directly under .local. Relative target paths are resolved from
+// the repository root; URL values are read independently by the task that uses them.
 val repositoryDir = file(".").getCanonicalFile
 val localConfigDir = repositoryDir / ".local"
 val oauthConfigPathPrefix = "OAUTHCONFIGPATH="
 val adminPasswordPathPrefix = "ADMINPASSWORDPATH="
+val localBaseUrlPrefix = "LOCAL_BASE_URL="
+val artifactBaseUrlPrefix = "ARTIFACT_BASE_URL="
 val publicBaseUrlPrefix = "PUBLIC_BASE_URL="
 
 // The Google OAuth "Web application" JSON downloaded from Google Cloud; must contain web.client_id and
@@ -250,6 +252,10 @@ lazy val backend = (project in file("backend"))
       LocalConfigBuild.optionalPath(localConfigDir, adminPasswordPathPrefix, repositoryDir),
     run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "test.env") ++
       OAuthBuild.configEnv(oauthConfigFile) ++
+      PublicBaseUrlBuild.configEnv(
+        localBaseUrlPrefix,
+        LocalConfigBuild.requiredValue(localConfigDir, localBaseUrlPrefix)
+      ) ++
       localAdminPasswordFile.value.fold(Map.empty[String, String])(AdminBuild.configEnv),
     optionalDebugPluginJar := Def.taskDyn {
       if (localAdminPasswordFile.value.nonEmpty)
@@ -299,6 +305,9 @@ lazy val e2etest = (project in file("e2etest"))
         }
       val projectId =
         testEnv.getOrElse("GCP_PROJECT_ID", sys.error("backend/src/main/resources/test.env is missing GCP_PROJECT_ID"))
+      val localBaseUrl = PublicBaseUrlBuild
+        .configEnv(localBaseUrlPrefix, LocalConfigBuild.requiredValue(localConfigDir, localBaseUrlPrefix))
+        .apply("PUBLIC_BASE_URL")
 
       // 1. The Firestore emulator: sessions live there (see SessionStore), and since it's in-memory only, it
       // has to keep running continuously from the manual login below through to a later authenticated test run
@@ -368,11 +377,10 @@ lazy val e2etest = (project in file("e2etest"))
       }
 
       log.info("Opening the backend's home page in the test browser...")
-      // "localhost", not "127.0.0.1": the backend derives its OAuth redirect_uri from the request's Host header
-      // verbatim, and the Google Cloud OAuth client is registered against http://localhost:8888/auth/callback
-      // (see README's OAuth setup) — 127.0.0.1 would produce a redirect_uri Google doesn't recognize.
+      // Open the same origin configured for `run`: the OAuth state cookie and callback must use one origin, and
+      // the callback URI registered with Google must match it exactly.
       val newTabRequest = java.net.http.HttpRequest
-        .newBuilder(java.net.URI.create(s"http://127.0.0.1:$testBrowserDebugPort/json/new?http://localhost:8888/"))
+        .newBuilder(java.net.URI.create(s"http://127.0.0.1:$testBrowserDebugPort/json/new?$localBaseUrl/"))
         .PUT(java.net.http.HttpRequest.BodyPublishers.noBody())
         .build()
       java.net.http.HttpClient
@@ -526,7 +534,8 @@ lazy val root = {
       },
       deploymentArtifact := Def.taskDyn {
         val deploymentEnv = PublicBaseUrlBuild.configEnv(
-          LocalConfigBuild.requiredValue(localConfigDir, publicBaseUrlPrefix)
+          artifactBaseUrlPrefix,
+          LocalConfigBuild.requiredValue(localConfigDir, artifactBaseUrlPrefix)
         )
         clean.value
         Def.task {
@@ -581,6 +590,7 @@ lazy val root = {
       }.value,
       deployGCloud := Def.taskDyn {
         val deploymentEnv = PublicBaseUrlBuild.configEnv(
+          publicBaseUrlPrefix,
           LocalConfigBuild.requiredValue(localConfigDir, publicBaseUrlPrefix)
         )
         clean.value
@@ -629,25 +639,25 @@ lazy val root = {
             IO.write(envFile, cloudRunEnvYaml(runtimeEnv))
             runCommand(
               gcloudCmd ++
-              Seq(
-                "run",
-                "deploy",
-                serviceName,
-                "--image",
-                remoteImage,
-                "--project",
-                gcloudProject,
-                "--region",
-                gcloudRegion,
-                "--service-account",
-                gcloudServiceAccount,
-                "--port",
-                "8080",
-                "--allow-unauthenticated",
-                "--env-vars-file",
-                envFile.getAbsolutePath,
-                "--quiet"
-              ),
+                Seq(
+                  "run",
+                  "deploy",
+                  serviceName,
+                  "--image",
+                  remoteImage,
+                  "--project",
+                  gcloudProject,
+                  "--region",
+                  gcloudRegion,
+                  "--service-account",
+                  gcloudServiceAccount,
+                  "--port",
+                  "8080",
+                  "--allow-unauthenticated",
+                  "--env-vars-file",
+                  envFile.getAbsolutePath,
+                  "--quiet"
+                ),
               repositoryDir,
               s"deploying Cloud Run service $serviceName"
             )

@@ -172,25 +172,27 @@ The backend reads the OAuth client ID and secret directly from its environment; 
 Firestore. The external JSON is the local source of truth. A standalone artifact receives the values from its
 generated ``prod.env``; a Cloud Run revision receives them as runtime configuration.
 
-``PUBLIC_BASE_URL`` is the externally visible origin of the running environment, without a path, query, or
-fragment. Committed ``test.env`` defines ``http://localhost:8888``; production values are injected only from
-Git-ignored local build configuration and never appear in committed ``prod.env``. The value is required and
-validated at startup. Non-local origins must use HTTPS; plain HTTP is accepted only for ``localhost``,
-``127.0.0.1``, and ``::1``. The backend always uses
+``PUBLIC_BASE_URL`` is the backend's runtime name for the externally visible origin, without a path, query, or
+fragment. No origin is committed in either ``test.env`` or ``prod.env``. Instead, each launch/deployment task
+reads its own Git-ignored ``.local/`` setting and injects the selected value into the process as
+``PUBLIC_BASE_URL``. The value is required and validated before that task proceeds. Non-local origins must use
+HTTPS; plain HTTP is accepted only for ``localhost``, ``127.0.0.1``, and ``::1``. The backend always uses
 ``PUBLIC_BASE_URL + /auth/callback`` for both sides of the OAuth code exchange and for secure-cookie selection;
 request ``Host`` and forwarding headers have no influence on it.
 
-For a production artifact, create any regular file directly under ``.local/`` whose first line is:
+Create three regular files directly under ``.local/``, with these respective first lines:
 
 .. code-block:: text
 
-   PUBLIC_BASE_URL=https://<public-host>
+   LOCAL_BASE_URL=http://localhost:8888
+   ARTIFACT_BASE_URL=https://<standalone-host>
+   PUBLIC_BASE_URL=https://<cloud-run-host>
 
-Exactly one active first line may use that prefix. ``sbt artifact`` reads and validates it at task execution,
-then appends it only to the generated Docker-context ``prod.env``. Missing, empty, duplicate, or invalid values
-stop artifact creation before Docker runs. Ordinary builds, local runs, and tests do not require or read this
-production value. To switch deployment targets on the same development machine, activate the desired local file
-and comment the prefix in the others; no sbt reload is required.
+Exactly one active first line may use each prefix. ``sbt run`` reads ``LOCAL_BASE_URL``; ``sbt artifact`` reads
+``ARTIFACT_BASE_URL``; and ``sbt deployGCloud`` reads ``PUBLIC_BASE_URL``. Each task reads only its own value at
+task execution, validates it, and exposes it to the backend as ``PUBLIC_BASE_URL``. Missing, empty, duplicate, or
+invalid values stop only the task that needs that setting. All three files can remain active simultaneously, and
+changes are picked up by the next task invocation without an sbt reload.
 
 Authentication uses the server-side OAuth 2.0 authorization-code flow.
 ``/auth/login`` redirects the browser to Google with a CSRF-protecting
@@ -223,21 +225,20 @@ no code changes are needed between environments:
   --impersonate-service-account=<GCP_PROJECT_ID's Firestore service account>``.
 * On Cloud Run, give the service's runtime identity equivalent Firestore permissions.
 
-The public origin, GCP project, Firestore database ID, and location live in an env file (``PUBLIC_BASE_URL``,
-``GCP_PROJECT_ID``, ``FIRESTORE_DATABASE_ID``, ``FIRESTORE_LOCATION``) rather than in Scala source. Which file
-depends on how the backend is started, so local runs and deployments can point at different configuration (a
-localhost origin and test Firestore database/project, say, versus the public origin and real database) without
-editing code:
+The GCP project, Firestore database ID, and location live in the tracked environment baselines rather than Scala
+source. Origins live under ``.local/`` and are selected per task, so local runs and deployments can use different
+configuration without editing code or toggling one shared setting:
 
-* ``sbt run`` sources ``backend/src/main/resources/test.env`` into the forked local process automatically. When
-  Debug is enabled, the build also supplies ``ADMIN_PASSWORD`` to that process without modifying ``test.env``.
+* ``sbt run`` sources ``backend/src/main/resources/test.env`` into the forked local process automatically, reads
+  ``LOCAL_BASE_URL`` from ``.local/``, and injects it as the backend's ``PUBLIC_BASE_URL``. When Debug is enabled,
+  the build also supplies ``ADMIN_PASSWORD`` without modifying ``test.env``.
 * ``sbt artifact`` instead reads ``backend/src/main/resources/prod.env`` and appends the OAuth configuration,
-  optional admin password, and locally configured production ``PUBLIC_BASE_URL`` to the generated ``prod.env``
-  staged in the Docker build context. The source ``prod.env`` remains free of secrets and deployment addresses;
-  the image's ``runApp`` launcher sources the generated copy at startup.
+  optional admin password, and ``ARTIFACT_BASE_URL`` (renamed to ``PUBLIC_BASE_URL`` for the backend) to the
+  generated ``prod.env`` staged in the Docker build context. The source ``prod.env`` remains free of secrets and
+  deployment addresses; the image's ``runApp`` launcher sources the generated copy at startup.
 * ``sbt deployGCloud`` builds from the same non-secret source ``prod.env`` without appending those values. It
-  supplies them to the Cloud Run revision at deployment time and relies on workload identity for Google
-  Application Default Credentials.
+  reads ``PUBLIC_BASE_URL`` from ``.local/``, supplies it and the runtime credentials to the Cloud Run revision at
+  deployment time, and relies on workload identity for Google Application Default Credentials.
 
 In every mode nothing needs to be set by hand at run time. On startup the backend checks for the Firestore database
 named ``FIRESTORE_DATABASE_ID`` and creates it in Native mode at ``FIRESTORE_LOCATION`` if it does not exist. A
@@ -249,12 +250,12 @@ One-time setup:
 1. In the Google Cloud console of the target project, create an OAuth 2.0
    web client and register every callback URI the app will use, for example
    ``http://localhost:8888/auth/callback`` and
-   ``https://<service>.run.app/auth/callback``. Each must exactly match the corresponding env file's
-   ``PUBLIC_BASE_URL`` with ``/auth/callback`` appended.
+   ``https://<service>.run.app/auth/callback``. Each must exactly match the corresponding ``.local/`` base-URL
+   setting with ``/auth/callback`` appended.
 2. Point ``OAUTHCONFIGPATH`` in a file under ``.local/`` to the downloaded OAuth client JSON. The build injects
    its values into the local process or deployment artifact.
-3. Before producing an artifact, configure its public origin through a ``PUBLIC_BASE_URL=...`` first line under
-   ``.local/`` as described above.
+3. Configure ``LOCAL_BASE_URL``, ``ARTIFACT_BASE_URL``, and ``PUBLIC_BASE_URL`` in separate first-line files under
+   ``.local/`` as described above. They can all remain active.
 
 Each document in the ``Access`` collection represents one browser session. Its
 document ID is a random 256-bit URL-safe session key, which is also stored in
@@ -591,10 +592,9 @@ whichever of them isn't already up:
 3. A visible, remote-debuggable Chrome (``--remote-debugging-port=9222``, using a dedicated profile under
    ``e2etest/target/test-chrome-profile`` rather than your everyday one — Chrome refuses to open a profile
    twice, and leaving debugging enabled on your daily-driver profile would let anything on the machine attach to
-   it), opened to the backend's home page at ``http://localhost:8888/``. That's ``localhost``, not
-   ``127.0.0.1``: ``test.env`` configures ``PUBLIC_BASE_URL=http://localhost:8888``, so Google returns to the
-   ``localhost`` origin. Visiting through ``127.0.0.1`` would leave the OAuth state cookie on a different origin,
-   and the callback would correctly reject it.
+   it), opened to the backend's configured ``LOCAL_BASE_URL``. With the recommended
+   ``LOCAL_BASE_URL=http://localhost:8888``, that is ``localhost``, not ``127.0.0.1``: visiting through the latter
+   would leave the OAuth state cookie on a different origin, and the callback would correctly reject it.
 
 Running ``launchTestBrowser`` again reuses whichever of the three are already up rather than starting duplicates.
 Once it's ready, switch to that Chrome window and sign in with Google as you normally would, then leave that
@@ -685,8 +685,9 @@ The OAuth client secret is still required by the running application to exchange
 to the Cloud Run revision from a temporary YAML file that is deleted after the command finishes. Google API and
 Firestore calls use the Cloud Run service's workload identity instead of local ADC.
 
-As with ``sbt artifact``, the public origin comes from the active ``PUBLIC_BASE_URL=...`` file under ``.local/``.
-It must be the address through which browsers actually reach this Cloud Run deployment, and its exact
+The Cloud Run origin comes from the active ``PUBLIC_BASE_URL=...`` file under ``.local/``; the standalone
+artifact's separate ``ARTIFACT_BASE_URL`` has no influence on this task. It must be the address through which
+browsers actually reach this Cloud Run deployment, and its exact
 ``/auth/callback`` URL must be registered on the Google OAuth client. On the first deployment, ``gcloud`` reports
 the newly assigned service URL; register it, activate it as ``PUBLIC_BASE_URL``, and deploy again unless a custom
 domain was already selected.
@@ -784,9 +785,10 @@ What absolutely needs changing
    environment-neutral settings, while private production addresses come from ``.local/`` (see
    `Login with Google`_ for how ``sbt run`` and ``sbt artifact`` assemble them differently):
 
-   * ``PUBLIC_BASE_URL`` — committed ``test.env`` uses ``http://localhost:8888``. Supply production origins
-     through Git-ignored ``.local/`` build configuration rather than either committed env file, and register the
-     selected origin's exact ``/auth/callback`` URI on the Google OAuth client.
+   * ``LOCAL_BASE_URL``, ``ARTIFACT_BASE_URL``, and ``PUBLIC_BASE_URL`` — supply all three through Git-ignored
+     ``.local/`` build configuration rather than either committed env file. They select the origin for ``run``,
+     ``artifact``, and ``deployGCloud`` respectively. Register each selected origin's exact ``/auth/callback`` URI
+     on the Google OAuth client.
    * ``GCP_PROJECT_ID``, ``FIRESTORE_DATABASE_ID``, ``FIRESTORE_LOCATION`` — your new project and the Firestore
      database/location you want created there.
    * ``GOOGLE_SERVICES`` — the scopes your fork's own routes need (see `Google service entitlements (Sheets)`_).
