@@ -204,7 +204,7 @@ def runCommand(command: Seq[String], workingDirectory: File, description: String
     try sys.process.Process(command, workingDirectory).!
     catch {
       case _: java.io.IOException =>
-        sys.error(s"Could not run ${command.head} while $description; ensure it is installed and on PATH.")
+        sys.error(s"Could not run ${command} while $description; ensure it is installed and on PATH.")
     }
   if (exitCode != 0) sys.error(s"Failed while $description (exit code $exitCode)")
 }
@@ -608,9 +608,12 @@ lazy val root = {
           val serviceName = name.value
           val remoteImage = s"$artifactRegistry/$serviceName:${version.value}"
           val registryHost = s"$gcloudRegion-docker.pkg.dev"
+          val gcloudCmd = Option(Seq("cmd", "/d", "/c", "gcloud.cmd"))
+            .filter(_ => sys.props("os.name").toLowerCase.contains("win"))
+            .getOrElse(Seq("gcloud"))
 
           runCommand(
-            Seq("gcloud", "auth", "configure-docker", registryHost, "--quiet"),
+            gcloudCmd ++ Seq("auth", "configure-docker", registryHost, "--quiet"),
             repositoryDir,
             s"configuring Docker authentication for $registryHost"
           )
@@ -625,8 +628,8 @@ lazy val root = {
           try {
             IO.write(envFile, cloudRunEnvYaml(runtimeEnv))
             runCommand(
+              gcloudCmd ++
               Seq(
-                "gcloud",
                 "run",
                 "deploy",
                 serviceName,
