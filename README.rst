@@ -60,32 +60,25 @@ Running locally
 ---------------
 
 The development build currently uses JDK 21, Scala 3.8.4, and sbt 1.12.14.
-Before running the application, configure the OAuth JSON path and Application
-Default Credentials as described below. From the repository root, run:
+Before running the application, create the shared build configuration described
+below. From the repository root, run:
 
 .. code-block:: console
 
    sbt run
 
-Then open http://localhost:8888/.
+Then open the configured ``LOCAL_BASE_URL``.
 
-The server binds to IPv4 loopback (``127.0.0.1``). Its port defaults to ``8888``.
-The first command-line argument takes precedence over the ``PORT`` environment
-variable:
-
-.. code-block:: console
-
-   sbt "run 9000"
-
-When supplied, either value must be an integer from ``1`` to ``65535``. An
-invalid value stops startup with a configuration error instead of silently
-falling back to ``8888``.
+The server binds to IPv4 loopback (``127.0.0.1``). ``sbt run`` derives ``PORT``
+from the explicit port in ``LOCAL_BASE_URL``. The backend has no port default and
+does not accept a command-line port: a missing, non-numeric, or out-of-range
+``PORT`` stops startup with a clear configuration error.
 
 On Windows, the development server can be stopped by port with:
 
 .. code-block:: powershell
 
-   ./scripts/stopapp.ps1 -Port 8888
+   ./scripts/stopapp.ps1 -Port <local-port>
 
 ``sbt run`` sets ``-Djava.net.preferIPv4Stack=true`` on the forked JVM (``run / javaOptions`` in ``build.sbt``),
 and the Docker image's ``runApp`` launcher passes the same flag directly. Some networks hand out an
@@ -157,25 +150,49 @@ Login with Google
 OAuth configuration file
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The OAuth configuration is compulsory. Create any regular file directly under the Git-ignored ``.local/``
-directory whose first line is:
+All machine- and deployment-specific build settings live in one external ``config.env``. The repository only
+contains an indirection to it: create one regular file directly under the Git-ignored ``.local/`` directory whose
+first line is:
 
 .. code-block:: text
 
-   OAUTHCONFIGPATH=/absolute/path/to/oauth.config.json
+   APPCONFIGPATH=/path/to/shared/config.env
 
-The path may instead be relative to the repository root. Exactly one file must have such a first line. Loading
+Exactly one file must have such a first line. The path may be absolute or relative to the repository root. Loading
 the sbt build fails if the pointer is absent or empty, multiple pointers match, or the referenced file does not
-exist. This makes a missing local OAuth configuration fail immediately instead of surfacing later at runtime.
+exist. Loading also requires ``OAUTH_CONFIG_PATH`` to resolve to a file. The external file uses strict
+``NAME=value`` syntax; blank lines and lines beginning with ``#`` are ignored, and duplicate, malformed, or unknown
+settings fail validation.
 
-Keep the referenced JSON outside the repository. It must use Google's standard ``Web application`` structure
+A complete configuration has this shape:
+
+.. code-block:: text
+
+   OAUTH_CONFIG_PATH=oauth.config.json
+   # ADMIN_PASSWORD_PATH=admin.pwd
+   LOCAL_BASE_URL=http://localhost:<local-port>
+   ARTIFACT_BASE_URL=https://<standalone-host>
+   PUBLIC_BASE_URL=https://<cloud-run-host>
+   ARTIFACT_PORT=<standalone-container-port>
+   GCP_PROJECT_ID=<project-id>
+   FIRESTORE_DATABASE_ID=<database-id>
+   FIRESTORE_LOCATION=<database-location>
+   GCLOUD_REGION=<cloud-run-region>
+   ARTIFACT_REGISTRY_REPOSITORY=<repository-name>
+   GCLOUD_SERVICE_ACCOUNT=<runtime-service-account-email>
+
+Relative paths in ``OAUTH_CONFIG_PATH`` and ``ADMIN_PASSWORD_PATH`` are resolved from the directory containing
+``config.env``. This makes the configuration and its referenced secret files portable as one shared directory,
+while every development machine needs only its own small ``APPCONFIGPATH`` locator.
+
+The compulsory OAuth JSON must use Google's standard ``Web application`` structure
 and contain ``web.client_id`` and ``web.client_secret``. For ``sbt run``, the build parses these fields into
 ``GOOGLE_OAUTH_CLIENT_ID`` and ``GOOGLE_OAUTH_CLIENT_SECRET`` and supplies them alongside the values from
 ``test.env`` without modifying that tracked file. For ``sbt artifact``, it appends the same values only to the
 generated ``prod.env`` staged into the Docker build context; the source ``prod.env`` remains secret-free. The
 resulting Docker image therefore contains a client secret and must be handled as a secret-bearing artifact (see
 `Packaging and deployment`_). ``sbt deployGCloud`` instead supplies the values to the Cloud Run revision and
-keeps them out of its image. The optional admin-password pointer follows the corresponding mechanism and is
+keeps them out of its image. The optional admin-password path follows the corresponding mechanism and is
 described in `Admin-protected routes`_.
 
 The backend reads the OAuth client ID and secret directly from its environment; it does not copy them into
@@ -184,25 +201,17 @@ generated ``prod.env``; a Cloud Run revision receives them as runtime configurat
 
 ``PUBLIC_BASE_URL`` is the backend's runtime name for the externally visible origin, without a path, query, or
 fragment. No origin is committed in either ``test.env`` or ``prod.env``. Instead, each launch/deployment task
-reads its own Git-ignored ``.local/`` setting and injects the selected value into the process as
+reads its setting from the external configuration and injects the selected value into the process as
 ``PUBLIC_BASE_URL``. The value is required and validated before that task proceeds. Non-local origins must use
 HTTPS; plain HTTP is accepted only for ``localhost``, ``127.0.0.1``, and ``::1``. The backend always uses
 ``PUBLIC_BASE_URL + /auth/callback`` for both sides of the OAuth code exchange and for secure-cookie selection;
 request ``Host`` and forwarding headers have no influence on it.
 
-Create three regular files directly under ``.local/``, with these respective first lines:
-
-.. code-block:: text
-
-   LOCAL_BASE_URL=http://localhost:8888
-   ARTIFACT_BASE_URL=https://<standalone-host>
-   PUBLIC_BASE_URL=https://<cloud-run-host>
-
-Exactly one active first line may use each prefix. ``sbt run`` reads ``LOCAL_BASE_URL``; ``sbt artifact`` reads
-``ARTIFACT_BASE_URL``; and ``sbt deployGCloud`` reads ``PUBLIC_BASE_URL``. Each task reads only its own value at
-task execution, validates it, and exposes it to the backend as ``PUBLIC_BASE_URL``. Missing, empty, duplicate, or
-invalid values stop only the task that needs that setting. All three files can remain active simultaneously, and
-changes are picked up by the next task invocation without an sbt reload.
+``sbt run`` reads ``LOCAL_BASE_URL``; ``sbt artifact`` reads ``ARTIFACT_BASE_URL``; and ``sbt deployGCloud`` reads
+``PUBLIC_BASE_URL``. Each task validates its value and exposes it to the backend as ``PUBLIC_BASE_URL``. The local
+URL must include an explicit port, which is also injected as ``PORT``. The standalone artifact receives
+``ARTIFACT_PORT``. Cloud Run supplies ``PORT`` itself. The shared file is read at task execution, so edits are
+picked up by the next task invocation without an sbt reload.
 
 Authentication uses the server-side OAuth 2.0 authorization-code flow.
 ``/auth/login`` redirects the browser to Google with a CSRF-protecting
@@ -235,20 +244,20 @@ no code changes are needed between environments:
   --impersonate-service-account=<GCP_PROJECT_ID's Firestore service account>``.
 * On Cloud Run, give the service's runtime identity equivalent Firestore permissions.
 
-The GCP project, Firestore database ID, and location live in the tracked environment baselines rather than Scala
-source. Origins live under ``.local/`` and are selected per task, so local runs and deployments can use different
-configuration without editing code or toggling one shared setting:
+The GCP project, Firestore database ID and location, deployment details, origins, and secret-file paths all live
+in the external shared configuration rather than Scala source or tracked environment files:
 
-* ``sbt run`` sources ``backend/src/main/resources/test.env`` into the forked local process automatically, reads
-  ``LOCAL_BASE_URL`` from ``.local/``, and injects it as the backend's ``PUBLIC_BASE_URL``. When Debug is enabled,
-  the build also supplies ``ADMIN_PASSWORD`` without modifying ``test.env``.
+* ``sbt run`` sources the environment-neutral ``backend/src/main/resources/test.env`` into the forked local
+  process, adds the shared GCP/Firestore settings, and injects ``LOCAL_BASE_URL`` as the backend's
+  ``PUBLIC_BASE_URL`` together with its port as ``PORT``. When Debug is enabled, the build also supplies
+  ``ADMIN_PASSWORD`` without modifying ``test.env``.
 * ``sbt artifact`` instead reads ``backend/src/main/resources/prod.env`` and appends the OAuth configuration,
   optional admin password, and ``ARTIFACT_BASE_URL`` (renamed to ``PUBLIC_BASE_URL`` for the backend) to the
   generated ``prod.env`` staged in the Docker build context. The source ``prod.env`` remains free of secrets and
   deployment addresses; the image's ``runApp`` launcher sources the generated copy at startup.
 * ``sbt deployGCloud`` builds from the same non-secret source ``prod.env`` without appending those values. It
-  reads ``PUBLIC_BASE_URL`` from ``.local/``, supplies it and the runtime credentials to the Cloud Run revision at
-  deployment time, and relies on workload identity for Google Application Default Credentials.
+  supplies the shared GCP/Firestore settings, ``PUBLIC_BASE_URL``, and runtime credentials to the Cloud Run
+  revision at deployment time, and relies on workload identity for Google Application Default Credentials.
 
 In every mode nothing needs to be set by hand at run time. On startup the backend checks for the Firestore database
 named ``FIRESTORE_DATABASE_ID`` and creates it in Native mode at ``FIRESTORE_LOCATION`` if it does not exist. A
@@ -259,13 +268,12 @@ One-time setup:
 
 1. In the Google Cloud console of the target project, create an OAuth 2.0
    web client and register every callback URI the app will use, for example
-   ``http://localhost:8888/auth/callback`` and
-   ``https://<service>.run.app/auth/callback``. Each must exactly match the corresponding ``.local/`` base-URL
+   ``http://localhost:<local-port>/auth/callback`` and
+   ``https://<service>.run.app/auth/callback``. Each must exactly match the corresponding shared base-URL
    setting with ``/auth/callback`` appended.
-2. Point ``OAUTHCONFIGPATH`` in a file under ``.local/`` to the downloaded OAuth client JSON. The build injects
-   its values into the local process or deployment artifact.
-3. Configure ``LOCAL_BASE_URL``, ``ARTIFACT_BASE_URL``, and ``PUBLIC_BASE_URL`` in separate first-line files under
-   ``.local/`` as described above. They can all remain active.
+2. Put ``OAUTH_CONFIG_PATH`` and the remaining settings in the external ``config.env`` described above. The build
+   injects the OAuth values into the local process or deployment without modifying tracked files.
+3. Add one ``APPCONFIGPATH`` locator under ``.local/`` on each development machine.
 
 Each document in the ``Access`` collection represents one browser session. Its
 document ID is a random 256-bit URL-safe session key, which is also stored in
@@ -302,13 +310,17 @@ entirely, so the ``gcloud auth application-default login`` step above isn't need
 comment out the line in ``test.env`` to go back to hitting the real project locally.
 
 ``firebase.json`` at the repository root configures the emulator's port (``8880``), enables its web UI
-(``4000``), and sets ``singleProjectMode: false``. ``.firebaserc`` alongside it pins the project id to
-``GCP_PROJECT_ID`` (``apps-416208`` by default). Start it with the Firebase CLI (``npm install -g firebase-tools``
-if you don't have it):
+(``4000``), and sets ``singleProjectMode: false``. Start it through sbt (install the Firebase CLI with
+``npm install -g firebase-tools`` first if needed):
 
 .. code-block:: console
 
-   firebase emulators:start --only firestore --project=<GCP_PROJECT_ID>
+   sbt firestoreEmulator
+
+The task reads ``GCP_PROJECT_ID`` from the shared configuration, copies ``firebase.json`` into a generated
+``target/firebase/`` working directory, writes a matching generated ``.firebaserc`` there, and invokes Firebase
+with an explicit ``--project`` argument. No project-specific Firebase file is committed. The E2E orchestration
+uses the same staging strategy.
 
 With it running, browse ``http://localhost:4000/firestore`` to inspect the ``Access`` collection live while
 exercising the login flow. Restarting the emulator wipes its data (it's in-memory only), so a fresh restart
@@ -324,20 +336,20 @@ the failure mode of each is "looks fine, shows nothing," with no error surfaced 
   real-GCP call "succeeds" from the app's point of view, so nothing gets logged.
 * ``singleProjectMode: false`` in ``firebase.json``: the Emulator UI defaults to "demo mode," which only
   recognizes a single project.
-* ``.firebaserc``: without it, the UI's own browser-side code resolves its *own* project id independently of
-  both the app and any ``--project`` flag, falling back to a synthetic ``demo-no-project`` — so it queries a
-  project with nothing in it while the real data sits under ``GCP_PROJECT_ID``. This one is diagnosable by
+* The generated ``.firebaserc``: without it, the UI's own browser-side code resolves its *own* project id
+  independently of both the app and any ``--project`` flag, falling back to a synthetic ``demo-no-project`` — so
+  it queries a project with nothing in it while the real data sits under ``GCP_PROJECT_ID``. This one is diagnosable by
   opening the browser's network tab and checking which project id the ``listCollectionIds``/data requests to
   ``localhost:8880`` actually use.
 
 Data can be genuinely present and readable — verifiable directly against the emulator's REST API, e.g. ``curl
-http://localhost:8880/v1/projects/<GCP_PROJECT_ID>/databases/webapptemplate/documents/Access`` — while the UI
+http://localhost:8880/v1/projects/<project-id>/databases/<database-id>/documents/Access`` — while the UI
 shows nothing, for any of the three reasons above.
 
-One further caveat worth checking if session storage doesn't work against the emulator: this app uses a *named*
-Firestore database (``FIRESTORE_DATABASE_ID=webapptemplate``, a newer real-Firestore feature), and older
-Firestore emulator versions only emulated the single default database. If session reads/writes fail against the
-emulator, try setting ``test.env``'s ``FIRESTORE_DATABASE_ID`` to ``(default)`` as a first troubleshooting step.
+One further caveat worth checking if session storage doesn't work against the emulator: this app can use a
+*named* Firestore database (a newer real-Firestore feature), and older Firestore emulator versions only emulated
+the single default database. If session reads/writes fail against the emulator, temporarily set the shared
+``FIRESTORE_DATABASE_ID`` to ``(default)`` as a first troubleshooting step.
 
 Google service entitlements (Sheets)
 -------------------------------------
@@ -387,15 +399,15 @@ unreadable ``ADMIN_PASSWORD`` produces ``503 Service Unavailable`` (fail closed 
 ``AuthenticatedAndAdminPassword`` composes that check with browser-session authentication.
 
 The separately built ``Debug`` plugin uses ``AccessPolicy.AuthenticatedAndAdminPassword``, so reaching it requires
-*both* a signed-in Google session and the correct password. To enable it, create any regular file directly under
-the Git-ignored ``.local/`` directory whose first line is:
+*both* a signed-in Google session and the correct password. To enable it, add this setting to the external
+``config.env``:
 
 .. code-block:: text
 
-   ADMINPASSWORDPATH=/absolute/path/to/admin.pwd
+   ADMIN_PASSWORD_PATH=admin.pwd
 
-The path may instead be relative to the repository root. Exactly one file may have such a first line; an empty
-path or multiple matches fail the build. The referenced password file must exist and contain a non-empty password.
+The path may be absolute or relative to ``config.env``. The referenced password file must exist and contain a
+non-empty password.
 
 When configured, ``sbt run`` and backend test tasks add the standalone ``debugPlugin`` JAR to the backend's
 runtime and test classpaths, root ``sbt test`` also runs the plugin's tests, and ``sbt artifact`` copies the JAR
@@ -406,12 +418,12 @@ into the Docker image. The password is supplied as
 link or button to it. A plugin that an operator should reach without signing in would instead use
 ``AccessPolicy.AdminPassword``.
 
-If no matching file exists under ``.local/``, the plugin's JAR is absent from backend classpaths and deployment
+If the setting is absent or commented out, the plugin's JAR is absent from backend classpaths and deployment
 artifacts, root tests skip its suite, and no admin password is read or injected. The project remains available
 for an explicit ``sbt debugPlugin/packageBin`` command.
 
 Debug enablement is evaluated when each relevant task runs, rather than when sbt loads ``build.sbt``. Editing or
-commenting the pointer therefore takes effect on the next ``clean``, ``run``, ``test``, or ``artifact`` command
+commenting the setting therefore takes effect on the next ``clean``, ``run``, ``test``, or ``artifact`` command
 in the same sbt session; no ``reload`` is required. Root ``clean`` also cleans the standalone plugin's output so
 an old JAR cannot persist as linked state.
 
@@ -512,8 +524,8 @@ Run all tests with:
 
    sbt test
 
-``sbt test`` at the root also runs the frontend's Scala.js tests. When ``ADMINPASSWORDPATH`` is configured under
-``.local/``, it additionally runs the Debug-plugin tests; without that opt-in the root build ignores the plugin.
+``sbt test`` at the root also runs the frontend's Scala.js tests. When ``ADMIN_PASSWORD_PATH`` is configured in
+the shared config, it additionally runs the Debug-plugin tests; without that opt-in the root build ignores the plugin.
 The frontend tests need Node.js installed; without it, run ``sbt backend/test`` and, when enabled,
 ``sbt debugPlugin/test``.
 
@@ -550,7 +562,8 @@ That single command does more than run tests — it's a full orchestration, defi
 1. Launches a headless Chrome via Selenium (Selenium Manager auto-resolves a matching chromedriver; only a real
    Chrome install is required) and immediately quits it, failing fast with a clear message if that doesn't work,
    rather than failing confusingly partway through the first real test.
-2. Checks port 8888 isn't already in use — by a leftover Docker container from manual testing, say — and fails
+2. Checks the port from ``LOCAL_BASE_URL`` isn't already in use — by a leftover Docker container from manual testing,
+   say — and fails
    loudly if it is, rather than the next step silently exercising and recording coverage for the wrong process.
 3. Starts the backend in the background via a *nested* ``sbt "project backend" coverage run``, mirroring the
    ``coverage``/``coverageReport`` workflow above so the HTTP traffic these tests generate is scoverage-
@@ -602,8 +615,7 @@ whichever of them isn't already up:
 3. A visible, remote-debuggable Chrome (``--remote-debugging-port=9222``, using a dedicated profile under
    ``e2etest/target/test-chrome-profile`` rather than your everyday one — Chrome refuses to open a profile
    twice, and leaving debugging enabled on your daily-driver profile would let anything on the machine attach to
-   it), opened to the backend's configured ``LOCAL_BASE_URL``. With the recommended
-   ``LOCAL_BASE_URL=http://localhost:8888``, that is ``localhost``, not ``127.0.0.1``: visiting through the latter
+   it), opened to the backend's configured ``LOCAL_BASE_URL``. Use ``localhost``, not ``127.0.0.1``: visiting through the latter
    would leave the OAuth state cookie on a different origin, and the callback would correctly reject it.
 
 Running ``launchTestBrowser`` again reuses whichever of the three are already up rather than starting duplicates.
@@ -648,9 +660,10 @@ Build a Docker image with:
    sbt artifact
 
 This performs a clean build, stages a Docker build context under ``backend/target/docker/`` (application JAR, all
-runtime dependency JARs, a generated ``prod.env`` with the OAuth client configuration and locally selected public
-origin, the ``runApp`` launcher, and the ``Dockerfile`` itself), and runs ``docker build`` there (assumed already
-installed). If Debug is enabled, its JAR and admin password are included too. The result is tagged both
+runtime dependency JARs, a generated ``prod.env`` with the shared runtime configuration, OAuth client
+configuration, selected public origin, and ``ARTIFACT_PORT``, the ``runApp`` launcher, and the ``Dockerfile``
+itself), and runs ``docker build`` there (assumed already installed). If Debug is enabled, its JAR and admin
+password are included too. The result is tagged both
 ``webapptemplate:<version>`` and ``webapptemplate:latest``.
 
 ``dockerPlatform`` near the top of ``build.sbt`` (default ``linux/amd64``) sets the image's target platform
@@ -677,26 +690,26 @@ Deploy the application with:
 
 The task performs a clean build, creates a separate Cloud Run Docker context under
 ``backend/target/docker-gcloud/``, authenticates Docker to Artifact Registry, pushes
-``asia-southeast1-docker.pkg.dev/apps-416208/apps/webapptemplate:<version>``, and deploys the public
-``webapptemplate`` service in ``asia-southeast1`` on port ``8080``. Docker and an authenticated ``gcloud`` CLI
-must be available locally. The deploying account needs permission to push to that repository and update Cloud
-Run. The task explicitly attaches ``webapptemplate-runner@apps-416208.iam.gserviceaccount.com`` as the service's
-runtime identity; that account separately needs the Firestore permissions used by the backend, and the deploying
+``<region>-docker.pkg.dev/<project-id>/<repository>/webapptemplate:<version>``, and deploys the public
+``webapptemplate`` service in the configured region on port ``8080``. It reads the project, region, repository,
+and runtime service account from the shared configuration. Docker and an authenticated ``gcloud`` CLI must be
+available locally. The deploying account needs permission to push to that repository and update Cloud Run. The
+configured runtime identity separately needs the Firestore permissions used by the backend, and the deploying
 user needs ``roles/iam.serviceAccountUser`` on it.
 
 The staged runtime libraries include the packaged ``sharedJVM`` project explicitly. Inter-project sbt
 dependencies otherwise appear on the backend runtime classpath as class directories rather than JAR files and
 would be lost when assembling the Docker context.
 
-The Cloud Run image is deliberately secret-free. Its ``prod.env`` contains only the committed, non-secret GCP
-and Google-service settings, its ADC directory is empty, and OAuth/admin values never enter the Docker context.
+The Cloud Run image is deliberately secret-free. Its ``prod.env`` contains only committed, environment-neutral
+Google-service settings, its ADC directory is empty, and GCP/OAuth/admin values never enter the Docker context.
 The OAuth client secret is still required by the running application to exchange authorization codes, so
 ``deployGCloud`` supplies it—along with the client ID, selected ``PUBLIC_BASE_URL``, and optional Debug password—
 to the Cloud Run revision from a temporary YAML file that is deleted after the command finishes. Google API and
 Firestore calls use the Cloud Run service's workload identity instead of local ADC.
 
-The Cloud Run origin comes from the active ``PUBLIC_BASE_URL=...`` file under ``.local/``; the standalone
-artifact's separate ``ARTIFACT_BASE_URL`` has no influence on this task. It must be the address through which
+The Cloud Run origin comes from ``PUBLIC_BASE_URL`` in the shared configuration; the standalone artifact's
+separate ``ARTIFACT_BASE_URL`` has no influence on this task. It must be the address through which
 browsers actually reach this Cloud Run deployment, and its exact
 ``/auth/callback`` URL must be registered on the Google OAuth client. On the first deployment, ``gcloud`` reports
 the newly assigned service URL; register it, activate it as ``PUBLIC_BASE_URL``, and deploy again unless a custom
@@ -708,14 +721,14 @@ unreachable from outside a container regardless of published ports, so the ``Doc
 
 .. code-block:: console
 
-   docker run -p 8888:8888 webapptemplate:latest
+   docker run -p <host-port>:<artifact-port> webapptemplate:latest
 
 or, if a reverse proxy (e.g. nginx) on the same host will terminate HTTPS and forward to it, publish only to
 loopback so nothing else on the network can reach the container directly:
 
 .. code-block:: console
 
-   docker run -p 127.0.0.1:8888:8888 webapptemplate:latest
+   docker run -p 127.0.0.1:<host-port>:<artifact-port> webapptemplate:latest
 
 Application Default Credentials work differently depending on where the image runs. On Cloud Run/GKE/GCE, an
 image built without a local ADC file falls through to the platform's workload identity (the attached service
@@ -745,7 +758,7 @@ Repository layout
 
    build.sbt
    firebase.json
-   .firebaserc
+   project/AppConfigBuild.scala
    project/OAuthBuild.scala
    project/AdminBuild.scala
    project/LocalConfigBuild.scala
@@ -787,28 +800,29 @@ What absolutely needs changing
    corresponding API isn't turned on for the project even though the OAuth scope was granted.
 
 2. **A new OAuth 2.0 web client**, created in that project, with your own callback URIs registered (step 1 under
-   `Login with Google`_'s one-time setup). Download its JSON as your fork's ``oauth.config.json``, keep it outside
-   source control, and point to it with an ``OAUTHCONFIGPATH=...`` first line in a file under ``.local/``. The
-   build is intentionally unusable until that compulsory pointer exists.
+   `Login with Google`_'s one-time setup). Download its JSON as your fork's ``oauth.config.json`` and keep it
+   outside source control. The build is intentionally unusable until the external configuration and its
+   compulsory ``OAUTH_CONFIG_PATH`` resolve successfully.
 
-3. **Environment configuration** — ``backend/src/main/resources/prod.env`` and ``test.env`` hold the committed
-   environment-neutral settings, while private production addresses come from ``.local/`` (see
-   `Login with Google`_ for how ``sbt run`` and ``sbt artifact`` assemble them differently):
+3. **External build configuration** — create the shared ``config.env`` described under `OAuth configuration file`_
+   and point each clone at it with one ``APPCONFIGPATH=...`` locator under ``.local/``. The tracked
+   ``backend/src/main/resources/prod.env`` and ``test.env`` contain only environment-neutral settings:
 
-   * ``LOCAL_BASE_URL``, ``ARTIFACT_BASE_URL``, and ``PUBLIC_BASE_URL`` — supply all three through Git-ignored
-     ``.local/`` build configuration rather than either committed env file. They select the origin for ``run``,
+   * ``LOCAL_BASE_URL``, ``ARTIFACT_BASE_URL``, and ``PUBLIC_BASE_URL`` — supply all three through the shared
+     configuration rather than either committed env file. They select the origin for ``run``,
      ``artifact``, and ``deployGCloud`` respectively. Register each selected origin's exact ``/auth/callback`` URI
      on the Google OAuth client.
    * ``GCP_PROJECT_ID``, ``FIRESTORE_DATABASE_ID``, ``FIRESTORE_LOCATION`` — your new project and the Firestore
      database/location you want created there.
+   * ``GCLOUD_REGION``, ``ARTIFACT_REGISTRY_REPOSITORY``, and ``GCLOUD_SERVICE_ACCOUNT`` — the Cloud Run target.
+   * ``ARTIFACT_PORT`` — the port baked into a standalone artifact. ``LOCAL_BASE_URL`` supplies the local run
+     port; Cloud Run supplies its own ``PORT``. The backend never silently chooses a port.
    * ``GOOGLE_SERVICES`` — the scopes your fork's own routes need (see `Google service entitlements (Sheets)`_).
      Clear it if you don't call any Google API beyond login; keep or extend it if you do.
-   * Leave ``PORT`` out of ``prod.env``. The backend defaults to ``8888`` for standalone containers, while Cloud
-     Run injects the port selected by ``deployGCloud``.
 
 4. **Optional Debug configuration** — if you keep the Debug plugin, create a fresh random password file outside
-   source control and point to it with an ``ADMINPASSWORDPATH=...`` first line in a file under ``.local/`` (see
-   `Admin-protected routes`_). Omit that local configuration to leave Debug out of normal builds.
+   source control and point to it with ``ADMIN_PASSWORD_PATH`` in the shared configuration (see
+   `Admin-protected routes`_). Omit or comment out that setting to leave Debug out of normal builds.
 
 5. **Application Default Credentials for the new project** (`Login with Google`_): locally,
    ``gcloud auth application-default login --impersonate-service-account=<new-project's-Firestore-service-account>``;

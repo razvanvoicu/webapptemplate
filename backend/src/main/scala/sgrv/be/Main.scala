@@ -7,9 +7,10 @@ import zio.http.*
 import zio.logging.*
 
 private[be] object Config:
-  val defaultPort = 8888
   val serverShutdownTimeout = 8.seconds
   val processShutdownTimeout = 9.seconds
+  final case class MissingPort()
+      extends IllegalArgumentException("Environment variable PORT is not set or is empty; startup cannot continue.")
   final case class InvalidPort(source: String, value: String)
       extends IllegalArgumentException(
         s"Invalid port configuration from $source: '$value'. Expected an integer from 1 to 65535."
@@ -69,14 +70,14 @@ object Main extends ZIOAppDefault:
     Method.GET / "main.js.map" -> handler(asset("main.js.map", application.json))
   )
 
-  private def port(args: Chunk[String]): IO[InvalidPort, Int] =
-    System.env("PORT").orElseSucceed(None).flatMap(environmentPort => ZIO.fromEither(port(args, environmentPort)))
+  private def port: IO[IllegalArgumentException, Int] =
+    System.env("PORT").orElseSucceed(None).flatMap(environmentPort => ZIO.fromEither(port(environmentPort)))
 
-  private[be] def port(args: Chunk[String], environmentPort: Option[String]): Either[InvalidPort, Int] =
-    args.headOption.map("the first command-line argument" -> _).orElse(environmentPort.map("PORT" -> _)) match
-      case None                  => Right(defaultPort)
-      case Some((source, value)) =>
-        value.toIntOption.filter(port => port >= 1 && port <= 65535).toRight(InvalidPort(source, value))
+  private[be] def port(environmentPort: Option[String]): Either[IllegalArgumentException, Int] =
+    environmentPort.map(_.trim).filter(_.nonEmpty) match
+      case None        => Left(MissingPort())
+      case Some(value) =>
+        value.toIntOption.filter(port => port >= 1 && port <= 65535).toRight(InvalidPort("PORT", value))
 
   private def bindAddress: UIO[String] =
     System.env("BIND_ADDRESS").orElseSucceed(None).map(bindAddress)
@@ -101,8 +102,7 @@ object Main extends ZIOAppDefault:
   // noinspection HttpUrlsUsage
   def run: ZIO[ZIOAppArgs, Any, Any] =
     val unit = for
-      args <- getArgs
-      p <- port(args)
+      p <- port
       host <- bindAddress
       environment <- ZIO.environment[BackendEnvironment]
       registry = CapabilityRegistry.fromEnvironment(environment)
@@ -122,4 +122,4 @@ object Main extends ZIOAppDefault:
         )
         .provide(Server.defaultWith(_ => serverConfig(host, p)))
     yield ()
-    unit.provideSome[ZIOAppArgs](backendLayer)
+    unit.provide(backendLayer)

@@ -6,6 +6,14 @@ object PublicBaseUrlBuild {
   def configEnv(configuredVariable: String, configuredValue: String): Map[String, String] =
     Map("PUBLIC_BASE_URL" -> validate(configuredVariable.stripSuffix("="), configuredValue.trim))
 
+  def localConfigEnv(configuredVariable: String, configuredValue: String): Map[String, String] = {
+    val variable = configuredVariable.stripSuffix("=")
+    val baseUrl = validate(variable, configuredValue.trim)
+    val port = URI.create(baseUrl).getPort
+    if (port < 0) sys.error(s"Configured $variable must contain an explicit port")
+    Map("PUBLIC_BASE_URL" -> baseUrl, "PORT" -> port.toString)
+  }
+
   private def validate(configuredVariable: String, value: String): String = {
     def invalid(reason: String): Nothing =
       sys.error(s"Configured $configuredVariable $reason")

@@ -4,11 +4,14 @@ import org.openqa.selenium.By
 import org.openqa.selenium.chrome.{ChromeDriver, ChromeOptions}
 
 /** Exercises the real, running backend (started by the e2etest orchestration in build.sbt) through an actual Chrome
-  * instance. The base URL matches `test.env`'s default `PORT`; override with `-De2e.baseUrl=...` if that's ever not the
-  * case.
+  * instance. The build supplies the shared configuration's `LOCAL_BASE_URL` as `E2E_BASE_URL`; the system property
+  * remains available as an explicit override.
   */
 class HomePageE2ESuite extends munit.FunSuite:
-  private val baseUrl = sys.props.getOrElse("e2e.baseUrl", "http://127.0.0.1:8888")
+  private val baseUrl = sys.props
+    .get("e2e.baseUrl")
+    .orElse(sys.env.get("E2E_BASE_URL"))
+    .getOrElse(throw new IllegalStateException("E2E_BASE_URL is not configured"))
   private var driver: ChromeDriver = scala.compiletime.uninitialized
 
   override def beforeAll(): Unit =

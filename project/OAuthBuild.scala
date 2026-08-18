@@ -26,7 +26,7 @@ object OAuthBuild {
     if (!file.isFile)
       sys.error(
         s"OAuth configuration file does not exist: ${file.getAbsolutePath}. " +
-          "Set OAUTHCONFIGPATH in a file under .local."
+          "Set OAUTH_CONFIG_PATH in the shared application configuration."
       )
 
     val json = IO.read(file)

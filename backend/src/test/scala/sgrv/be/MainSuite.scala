@@ -1,7 +1,7 @@
 package sgrv.be
 
 import java.nio.charset.StandardCharsets.UTF_8
-import zio.{Chunk, Runtime, Task, Unsafe, ZIO}
+import zio.{Runtime, Task, Unsafe, ZIO}
 import zio.http.{Header, MediaType, Request, Status, URL}
 
 class MainSuite extends munit.FunSuite:
@@ -36,46 +36,59 @@ class MainSuite extends munit.FunSuite:
   test("keeps tracked environment baselines free of task-specific origins and injected runtime secrets"):
     val prodEnv = resourceText("prod.env").linesIterator.map(_.trim).filter(_.nonEmpty).toSeq
     val testEnv = resourceText("test.env").linesIterator.map(_.trim).filter(_.nonEmpty).toSeq
-    val deploymentOnlyKeys = Seq(
+    val externallyConfiguredKeys = Seq(
       "PORT=",
       "LOCAL_BASE_URL=",
       "ARTIFACT_BASE_URL=",
       "PUBLIC_BASE_URL=",
+      "ARTIFACT_PORT=",
+      "GCP_PROJECT_ID=",
+      "FIRESTORE_DATABASE_ID=",
+      "FIRESTORE_LOCATION=",
+      "GCLOUD_REGION=",
+      "ARTIFACT_REGISTRY_REPOSITORY=",
+      "GCLOUD_SERVICE_ACCOUNT=",
       "GOOGLE_OAUTH_CLIENT_ID=",
       "GOOGLE_OAUTH_CLIENT_SECRET=",
       "ADMIN_PASSWORD="
     )
 
-    deploymentOnlyKeys.foreach(prefix => assert(!prodEnv.exists(_.startsWith(prefix)), s"Found $prefix in prod.env"))
-    Seq("LOCAL_BASE_URL=", "ARTIFACT_BASE_URL=", "PUBLIC_BASE_URL=").foreach(prefix =>
+    externallyConfiguredKeys.foreach(prefix =>
+      assert(!prodEnv.exists(_.startsWith(prefix)), s"Found $prefix in prod.env")
       assert(!testEnv.exists(_.startsWith(prefix)), s"Found $prefix in test.env")
     )
 
-  test("selects a valid port from arguments, environment, or the default"):
-    assertEquals(Main.port(Chunk("9000"), Some("7000")), Right(9000))
-    assertEquals(Main.port(Chunk.empty, Some("7000")), Right(7000))
-    assertEquals(Main.port(Chunk.empty, None), Right(8888))
-
-  test("rejects an invalid port from the source that wins precedence"):
-    val argumentError = Main.port(Chunk("invalid"), Some("7000")).swap.toOption.get
-    val environmentError = Main.port(Chunk.empty, Some("70000")).swap.toOption.get
-
+  test("requires PORT and accepts a valid environment value"):
+    assertEquals(Main.port(Some("7000")), Right(7000))
+    assertEquals(Main.port(Some(" 7000 ")), Right(7000))
     assertEquals(
-      argumentError.getMessage,
-      "Invalid port configuration from the first command-line argument: 'invalid'. " +
-        "Expected an integer from 1 to 65535."
+      Main.port(None).swap.toOption.get.getMessage,
+      "Environment variable PORT is not set or is empty; startup cannot continue."
     )
     assertEquals(
-      environmentError.getMessage,
+      Main.port(Some("  ")).swap.toOption.get.getMessage,
+      "Environment variable PORT is not set or is empty; startup cannot continue."
+    )
+
+  test("rejects an invalid PORT value"):
+    val nonNumericError = Main.port(Some("invalid")).swap.toOption.get
+    val outOfRangeError = Main.port(Some("70000")).swap.toOption.get
+
+    assertEquals(
+      nonNumericError.getMessage,
+      "Invalid port configuration from PORT: 'invalid'. Expected an integer from 1 to 65535."
+    )
+    assertEquals(
+      outOfRangeError.getMessage,
       "Invalid port configuration from PORT: '70000'. Expected an integer from 1 to 65535."
     )
 
   test("accepts only ports in the TCP range"):
-    assert(Main.port(Chunk("1"), None).isRight)
-    assert(Main.port(Chunk("65535"), None).isRight)
-    assert(Main.port(Chunk("0"), None).isLeft)
-    assert(Main.port(Chunk("-1"), None).isLeft)
-    assert(Main.port(Chunk("65536"), None).isLeft)
+    assert(Main.port(Some("1")).isRight)
+    assert(Main.port(Some("65535")).isRight)
+    assert(Main.port(Some("0")).isLeft)
+    assert(Main.port(Some("-1")).isLeft)
+    assert(Main.port(Some("65536")).isLeft)
 
   test("selects the bind address from the environment, defaulting to IPv4 loopback"):
     assertEquals(Main.bindAddress(Some("0.0.0.0")), "0.0.0.0")

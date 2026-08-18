@@ -13,8 +13,11 @@ private[about] object BuildInformation:
     finally input.close()
 
     def required(name: String): String =
-      Option(properties.getProperty(name)).map(_.trim).filter(_.nonEmpty).getOrElse:
-        throw new IllegalStateException(s"Generated resource $resourceName is missing $name")
+      Option(properties.getProperty(name))
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .getOrElse:
+          throw new IllegalStateException(s"Generated resource $resourceName is missing $name")
 
     AboutInfo(
       appVersion = required("app.version"),

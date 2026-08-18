@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory = $true)]
     [ValidateRange(1, 65535)]
-    [int] $Port = 8888
+    [int] $Port
 )
 
 $connection = Get-NetTCPConnection `

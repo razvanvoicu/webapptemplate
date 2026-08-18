@@ -6,7 +6,7 @@ object AdminBuild {
     if (!file.isFile)
       sys.error(
         s"Admin password file does not exist: ${file.getAbsolutePath}. " +
-          "Set ADMINPASSWORDPATH in a file under .local."
+          "Set ADMIN_PASSWORD_PATH in the shared application configuration."
       )
 
     val password = IO.read(file).trim

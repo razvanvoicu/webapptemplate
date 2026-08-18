@@ -3,21 +3,29 @@ import org.scalajs.linker.interface.ModuleKind
 import sbtcrossproject.CrossPlugin.autoImport.*
 import scalajscrossproject.ScalaJSCrossPlugin.autoImport.*
 
-// Local configuration keeps machine-specific paths and deployment origins outside source control. Every setting
-// is the first line of exactly one regular file directly under .local. Relative target paths are resolved from
-// the repository root; URL values are read independently by the task that uses them.
+// One ignored, machine-specific locator points to a shared configuration file. Its contents are reread by every
+// task, while relative secret paths inside it are resolved from the shared file's directory.
 val repositoryDir = file(".").getCanonicalFile
 val localConfigDir = repositoryDir / ".local"
-val oauthConfigPathPrefix = "OAUTHCONFIGPATH="
-val adminPasswordPathPrefix = "ADMINPASSWORDPATH="
-val localBaseUrlPrefix = "LOCAL_BASE_URL="
-val artifactBaseUrlPrefix = "ARTIFACT_BASE_URL="
-val publicBaseUrlPrefix = "PUBLIC_BASE_URL="
-
-// The Google OAuth "Web application" JSON downloaded from Google Cloud; must contain web.client_id and
-// web.client_secret. Merely loading the build fails if its compulsory .local pointer or target file is absent.
-val oauthConfigFile: File =
-  LocalConfigBuild.requiredPath(localConfigDir, oauthConfigPathPrefix, repositoryDir)
+val appConfigPathPrefix = "APPCONFIGPATH="
+val appConfigFile = LocalConfigBuild.requiredPath(localConfigDir, appConfigPathPrefix, repositoryDir)
+val supportedAppConfigKeys = Set(
+  "OAUTH_CONFIG_PATH",
+  "ADMIN_PASSWORD_PATH",
+  "LOCAL_BASE_URL",
+  "ARTIFACT_BASE_URL",
+  "PUBLIC_BASE_URL",
+  "ARTIFACT_PORT",
+  "GCP_PROJECT_ID",
+  "FIRESTORE_DATABASE_ID",
+  "FIRESTORE_LOCATION",
+  "GCLOUD_REGION",
+  "ARTIFACT_REGISTRY_REPOSITORY",
+  "GCLOUD_SERVICE_ACCOUNT"
+)
+// OAuth is compulsory for every clone: validate it while loading the build as well as rereading it in tasks.
+val initialAppConfig = AppConfigBuild.load(appConfigFile, supportedAppConfigKeys)
+val initialOAuthConfigFile = initialAppConfig.requiredPath("OAUTH_CONFIG_PATH")
 
 // gcloud's own well-known Application Default Credentials location, baked into the standalone `artifact` image
 // (only) so `docker run` can reach Firestore/Sheets outside a GCP platform's own workload identity. The Cloud Run
@@ -33,12 +41,6 @@ val adcFile = file(
 // TEMPLATE SETTING: the target platform for the Docker image, independent of the machine running `sbt artifact`
 // (e.g. building on Apple Silicon for an amd64 deployment host). BuildKit cross-builds via emulation as needed.
 val dockerPlatform = "linux/amd64"
-
-// TEMPLATE SETTINGS: the managed Cloud Run target and its private Artifact Registry repository.
-val gcloudProject = "apps-416208"
-val gcloudRegion = "asia-southeast1"
-val artifactRegistry = s"$gcloudRegion-docker.pkg.dev/$gcloudProject/apps"
-val gcloudServiceAccount = s"webapptemplate-runner@$gcloudProject.iam.gserviceaccount.com"
 
 // TEMPLATE SETTING: where Chrome lives, for `e2etest/launchTestBrowser`'s visible, remote-debuggable instance —
 // used to sign in to Google manually once and reuse that session in an authenticated E2E run, since Google
@@ -60,6 +62,7 @@ lazy val deploymentArtifact = taskKey[Unit]("Build the backend's Docker image")
 lazy val deployGCloud = taskKey[Unit](
   "Build a secret-free image, push it to Artifact Registry, and deploy it to Google Cloud Run"
 )
+lazy val firestoreEmulator = taskKey[Unit]("Start the Firestore emulator with generated, untracked project config")
 
 lazy val launchTestBrowser = taskKey[Unit](
   "Launch the Firestore emulator, the coverage-instrumented backend, and a visible, remote-debuggable Chrome " +
@@ -73,11 +76,13 @@ lazy val testAuthenticated = taskKey[Unit](
 )
 
 lazy val readmeToHtml = taskKey[Unit]("Render README.rst to target/README.html via docutils")
+lazy val appBuildConfig = taskKey[AppConfigBuild.Config]("Read and validate the shared application configuration")
+lazy val localOAuthConfigFile = taskKey[File]("Resolve OAUTH_CONFIG_PATH from the shared application configuration")
 lazy val localAdminPasswordFile = taskKey[Option[File]](
-  "Resolve the optional ADMINPASSWORDPATH pointer from the current contents of .local"
+  "Resolve the optional ADMIN_PASSWORD_PATH from the shared application configuration"
 )
 lazy val optionalDebugPluginJar = taskKey[Option[File]](
-  "Build the Debug plugin JAR when ADMINPASSWORDPATH is configured under .local"
+  "Build the Debug plugin JAR when ADMIN_PASSWORD_PATH is configured"
 )
 
 addCommandAlias("artifact", "deploymentArtifact")
@@ -236,6 +241,34 @@ def runCommand(command: Seq[String], workingDirectory: File, description: String
   if (exitCode != 0) sys.error(s"Failed while $description (exit code $exitCode)")
 }
 
+def platformCli(name: String): Seq[String] =
+  if (sys.props("os.name").toLowerCase.contains("win")) Seq("cmd", "/d", "/c", s"$name.cmd")
+  else Seq(name)
+
+def stageFirebaseConfiguration(repository: File, stageDir: File, projectId: String): File = {
+  val sourceConfig = repository / "firebase.json"
+  if (!sourceConfig.isFile) sys.error(s"Missing Firebase emulator configuration: ${sourceConfig.getAbsolutePath}")
+  val escapedProjectId = projectId.replace("\\", "\\\\").replace("\"", "\\\"")
+
+  IO.delete(stageDir)
+  IO.createDirectory(stageDir)
+  IO.copyFile(sourceConfig, stageDir / "firebase.json")
+  IO.write(
+    stageDir / ".firebaserc",
+    s"""|{
+        |  "projects": {
+        |    "default": "$escapedProjectId"
+        |  }
+        |}
+        |""".stripMargin
+  )
+  stageDir
+}
+
+def firebaseEmulatorCommand(projectId: String): Seq[String] =
+  platformCli("firebase") ++
+    Seq("emulators:start", "--only", "firestore", s"--project=$projectId", "--config", "firebase.json")
+
 // True if something is already accepting connections on host:port. Used both so the e2etest suite doesn't
 // silently test against a stray leftover process on the backend's port, and so `launchTestBrowser` can detect
 // an already-running Chrome instance instead of launching a duplicate.
@@ -273,15 +306,17 @@ lazy val backend = (project in file("backend"))
     // Some networks hand out AAAA (IPv6) records for googleapis.com without actually routing IPv6, which makes
     // outbound Sheets/Drive calls fail with NoRouteToHostException; prefer IPv4 to avoid that.
     run / javaOptions += "-Djava.net.preferIPv4Stack=true",
-    localAdminPasswordFile :=
-      LocalConfigBuild.optionalPath(localConfigDir, adminPasswordPathPrefix, repositoryDir),
-    run / envVars ++= parseEnvFile((Compile / resourceDirectory).value / "test.env") ++
-      OAuthBuild.configEnv(oauthConfigFile) ++
-      PublicBaseUrlBuild.configEnv(
-        localBaseUrlPrefix,
-        LocalConfigBuild.requiredValue(localConfigDir, localBaseUrlPrefix)
-      ) ++
-      localAdminPasswordFile.value.fold(Map.empty[String, String])(AdminBuild.configEnv),
+    appBuildConfig := AppConfigBuild.load(appConfigFile, supportedAppConfigKeys),
+    localOAuthConfigFile := appBuildConfig.value.requiredPath("OAUTH_CONFIG_PATH"),
+    localAdminPasswordFile := appBuildConfig.value.optionalPath("ADMIN_PASSWORD_PATH"),
+    run / envVars ++= {
+      val config = appBuildConfig.value
+      parseEnvFile((Compile / resourceDirectory).value / "test.env") ++
+        AppConfigBuild.gcpRuntimeEnv(config) ++
+        OAuthBuild.configEnv(localOAuthConfigFile.value) ++
+        PublicBaseUrlBuild.localConfigEnv("LOCAL_BASE_URL", config.required("LOCAL_BASE_URL")) ++
+        localAdminPasswordFile.value.fold(Map.empty[String, String])(AdminBuild.configEnv)
+    },
     optionalDebugPluginJar := Def.taskDyn {
       if (localAdminPasswordFile.value.nonEmpty)
         Def.task[Option[File]](Some((LocalProject("debugPlugin") / Compile / packageBin).value))
@@ -292,7 +327,7 @@ lazy val backend = (project in file("backend"))
   )
 
 /** Optional diagnostic plugin. It compiles against the backend SPI and produces a separate JAR. Runtime and test tasks
-  * add it to backend classpaths only when the current .local contents configure ADMINPASSWORDPATH.
+  * add it to backend classpaths only when the shared configuration enables ADMIN_PASSWORD_PATH.
   */
 lazy val debugPlugin = (project in file("debug-plugin"))
   .dependsOn(backend % "provided->compile")
@@ -313,9 +348,19 @@ lazy val e2etest = (project in file("e2etest"))
     name := "webapptemplate-e2etest",
     coverageEnabled := false,
     libraryDependencies ++= Seq(selenium % Test, munit % Test),
+    Test / fork := true,
+    Test / envVars ++= {
+      val config = (backend / appBuildConfig).value
+      Map(
+        "E2E_BASE_URL" -> PublicBaseUrlBuild
+          .localConfigEnv("LOCAL_BASE_URL", config.required("LOCAL_BASE_URL"))
+          .apply("PUBLIC_BASE_URL")
+      )
+    },
     launchTestBrowser := {
       val log = streams.value.log
       val repoRoot = (ThisBuild / baseDirectory).value
+      val config = (backend / appBuildConfig).value
 
       val testEnv = parseEnvFile((backend / Compile / resourceDirectory).value / "test.env")
       val (emulatorHost, emulatorPort) =
@@ -328,11 +373,10 @@ lazy val e2etest = (project in file("e2etest"))
           case Array(host, port) => (host, port.toInt)
           case _                 => sys.error(s"Malformed FIRESTORE_EMULATOR_HOST in test.env")
         }
-      val projectId =
-        testEnv.getOrElse("GCP_PROJECT_ID", sys.error("backend/src/main/resources/test.env is missing GCP_PROJECT_ID"))
-      val localBaseUrl = PublicBaseUrlBuild
-        .configEnv(localBaseUrlPrefix, LocalConfigBuild.requiredValue(localConfigDir, localBaseUrlPrefix))
-        .apply("PUBLIC_BASE_URL")
+      val projectId = config.required("GCP_PROJECT_ID")
+      val localRuntimeEnv = PublicBaseUrlBuild.localConfigEnv("LOCAL_BASE_URL", config.required("LOCAL_BASE_URL"))
+      val localBaseUrl = localRuntimeEnv("PUBLIC_BASE_URL")
+      val localPort = localRuntimeEnv("PORT").toInt
 
       // 1. The Firestore emulator: sessions live there (see SessionStore), and since it's in-memory only, it
       // has to keep running continuously from the manual login below through to a later authenticated test run
@@ -342,9 +386,10 @@ lazy val e2etest = (project in file("e2etest"))
       else {
         log.info(s"Starting the Firestore emulator (project $projectId) in the background...")
         val emulatorLog = (Test / target).value / "test-firestore-emulator.log"
+        val firebaseDir = stageFirebaseConfiguration(repoRoot, (Test / target).value / "firebase", projectId)
         try
-          new java.lang.ProcessBuilder("firebase", "emulators:start", "--only", "firestore", s"--project=$projectId")
-            .directory(repoRoot)
+          new java.lang.ProcessBuilder(firebaseEmulatorCommand(projectId) *)
+            .directory(firebaseDir)
             .redirectErrorStream(true)
             .redirectOutput(emulatorLog)
             .start()
@@ -359,8 +404,8 @@ lazy val e2etest = (project in file("e2etest"))
       // 2. The backend, coverage-instrumented and pointed at that emulator via test.env, left running (unlike
       // e2etest/test's own backend, which it starts and tears down itself) so the session created by the
       // manual login below is still there for a later authenticated test run to reuse.
-      if (isPortOpen("127.0.0.1", 8888))
-        log.info("Backend already listening on 127.0.0.1:8888; reusing it.")
+      if (isPortOpen("127.0.0.1", localPort))
+        log.info(s"Backend already listening on 127.0.0.1:$localPort; reusing it.")
       else {
         log.info("Starting the backend in the background with scoverage coverage enabled...")
         val backendLog = (Test / target).value / "test-backend.log"
@@ -369,8 +414,8 @@ lazy val e2etest = (project in file("e2etest"))
           .redirectErrorStream(true)
           .redirectOutput(backendLog)
           .start()
-        if (!waitForPortOpen("127.0.0.1", 8888, 90000))
-          sys.error(s"Backend did not become ready within 90s (see $backendLog).")
+        if (!waitForPortOpen("127.0.0.1", localPort, 90000))
+          sys.error(s"Backend did not open 127.0.0.1:$localPort within 90s (see $backendLog).")
       }
 
       // 3. A visible, remote-debuggable Chrome, opened to the backend's home page and ready for you to click
@@ -425,8 +470,13 @@ lazy val e2etest = (project in file("e2etest"))
     },
     testAuthenticated := Def.taskDyn {
       val log = streams.value.log
-      if (!isPortOpen("127.0.0.1", 8888))
-        sys.error("No backend is listening on 127.0.0.1:8888; run `sbt e2etest/launchTestBrowser` first.")
+      val config = (backend / appBuildConfig).value
+      val localPort = PublicBaseUrlBuild
+        .localConfigEnv("LOCAL_BASE_URL", config.required("LOCAL_BASE_URL"))
+        .apply("PORT")
+        .toInt
+      if (!isPortOpen("127.0.0.1", localPort))
+        sys.error(s"No backend is listening on 127.0.0.1:$localPort; run `sbt e2etest/launchTestBrowser` first.")
       if (!isPortOpen("127.0.0.1", testBrowserDebugPort))
         sys.error(
           s"No test browser is listening on 127.0.0.1:$testBrowserDebugPort; run `sbt e2etest/launchTestBrowser` " +
@@ -438,6 +488,10 @@ lazy val e2etest = (project in file("e2etest"))
     Test / test := Def.taskDyn {
       val log = streams.value.log
       val repoRoot = (ThisBuild / baseDirectory).value
+      val config = (backend / appBuildConfig).value
+      val localRuntimeEnv = PublicBaseUrlBuild.localConfigEnv("LOCAL_BASE_URL", config.required("LOCAL_BASE_URL"))
+      val localBaseUrl = localRuntimeEnv("PUBLIC_BASE_URL")
+      val localPort = localRuntimeEnv("PORT").toInt
 
       log.info("Checking that Selenium can launch Chrome...")
       (Test / runMain).toTask(" sgrv.e2e.SeleniumCheck").value
@@ -446,9 +500,9 @@ lazy val e2etest = (project in file("e2etest"))
       // would otherwise make the readiness poll below pass instantly against THAT process instead of the
       // freshly coverage-instrumented one this task is about to start — silently testing the wrong instance
       // and recording zero coverage, while still reporting green.
-      if (isPortOpen("127.0.0.1", 8888))
+      if (isPortOpen("127.0.0.1", localPort))
         sys.error(
-          "Port 8888 is already in use by something else (check `docker ps` / `lsof -i :8888`); stop it first " +
+          s"Port $localPort is already in use by something else; stop it first " +
             "so the E2E suite can be sure it's talking to the coverage-instrumented backend this task starts."
         )
 
@@ -478,7 +532,7 @@ lazy val e2etest = (project in file("e2etest"))
 
       val ready = {
         val client = java.net.http.HttpClient.newHttpClient()
-        val request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:8888/")).GET().build()
+        val request = java.net.http.HttpRequest.newBuilder(java.net.URI.create(s"$localBaseUrl/")).GET().build()
         val deadline = System.currentTimeMillis() + 90000
         var upAt: Option[Long] = None
         while (upAt.isEmpty && System.currentTimeMillis() < deadline && backendProcess.isAlive) {
@@ -542,6 +596,12 @@ lazy val root = {
         (debugPlugin / clean).value
         IO.delete((Compile / target).value)
       },
+      firestoreEmulator := {
+        val config = (backend / appBuildConfig).value
+        val projectId = config.required("GCP_PROJECT_ID")
+        val stageDir = stageFirebaseConfiguration(repositoryDir, (Compile / target).value / "firebase", projectId)
+        runCommand(firebaseEmulatorCommand(projectId), stageDir, "running the Firestore emulator")
+      },
       readmeToHtml := {
         val log = streams.value.log
         val repoRoot = (ThisBuild / baseDirectory).value
@@ -558,10 +618,12 @@ lazy val root = {
         log.success(s"Rendered README.rst to ${outputDir / "README.html"}")
       },
       deploymentArtifact := Def.taskDyn {
+        val config = (backend / appBuildConfig).value
+        val oauthConfig = (backend / localOAuthConfigFile).value
         val deploymentEnv = PublicBaseUrlBuild.configEnv(
-          artifactBaseUrlPrefix,
-          LocalConfigBuild.requiredValue(localConfigDir, artifactBaseUrlPrefix)
-        )
+          "ARTIFACT_BASE_URL",
+          config.required("ARTIFACT_BASE_URL")
+        ) ++ Map("PORT" -> config.requiredPort("ARTIFACT_PORT")) ++ AppConfigBuild.gcpRuntimeEnv(config)
         clean.value
         Def.task {
           val log = streams.value.log
@@ -574,7 +636,7 @@ lazy val root = {
           val resources = (backend / Compile / resourceDirectory).value
           val outputDir = (backend / Compile / target).value
 
-          val generatedEnv = OAuthBuild.configEnv(oauthConfigFile) ++
+          val generatedEnv = OAuthBuild.configEnv(oauthConfig) ++
             (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv) ++
             deploymentEnv
 
@@ -614,10 +676,17 @@ lazy val root = {
         }
       }.value,
       deployGCloud := Def.taskDyn {
+        val config = (backend / appBuildConfig).value
+        val oauthConfig = (backend / localOAuthConfigFile).value
         val deploymentEnv = PublicBaseUrlBuild.configEnv(
-          publicBaseUrlPrefix,
-          LocalConfigBuild.requiredValue(localConfigDir, publicBaseUrlPrefix)
-        )
+          "PUBLIC_BASE_URL",
+          config.required("PUBLIC_BASE_URL")
+        ) ++ AppConfigBuild.gcpRuntimeEnv(config)
+        val gcloudProject = config.required("GCP_PROJECT_ID")
+        val gcloudRegion = config.required("GCLOUD_REGION")
+        val artifactRepository = config.required("ARTIFACT_REGISTRY_REPOSITORY")
+        val artifactRegistry = s"$gcloudRegion-docker.pkg.dev/$gcloudProject/$artifactRepository"
+        val gcloudServiceAccount = config.required("GCLOUD_SERVICE_ACCOUNT")
         clean.value
         Def.task {
           val log = streams.value.log
@@ -633,7 +702,7 @@ lazy val root = {
           // OAuth and optional Debug credentials are required by the running service, but stay outside the
           // Docker context. Cloud Run receives them while creating the revision; local ADC is omitted entirely
           // so Google client libraries use the service's workload identity.
-          val runtimeEnv = OAuthBuild.configEnv(oauthConfigFile) ++
+          val runtimeEnv = OAuthBuild.configEnv(oauthConfig) ++
             (backend / localAdminPasswordFile).value.fold(Map.empty[String, String])(AdminBuild.configEnv) ++
             deploymentEnv
 
@@ -643,9 +712,7 @@ lazy val root = {
           val serviceName = name.value
           val remoteImage = s"$artifactRegistry/$serviceName:${version.value}"
           val registryHost = s"$gcloudRegion-docker.pkg.dev"
-          val gcloudCmd = Option(Seq("cmd", "/d", "/c", "gcloud.cmd"))
-            .filter(_ => sys.props("os.name").toLowerCase.contains("win"))
-            .getOrElse(Seq("gcloud"))
+          val gcloudCmd = platformCli("gcloud")
 
           runCommand(
             gcloudCmd ++ Seq("auth", "configure-docker", registryHost, "--quiet"),

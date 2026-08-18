@@ -1,5 +1,7 @@
 /.bsp/
 /.local/
+/.firebaserc
+/.claude/settings.local.json
 target/
 /.idea
 .venv

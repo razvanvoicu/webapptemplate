@@ -23,8 +23,6 @@ ENV BIND_ADDRESS=0.0.0.0
 # at their well-known gcloud path. If it does not, Application Default Credentials can continue to workload
 # identity or another provider instead of failing on a forced, nonexistent file path.
 
-EXPOSE 8888
-
 # Docker sends this directly to the JVM: the exec-form entrypoint starts runApp without an intermediate Docker
 # shell, and runApp replaces itself with Java after loading prod.env.
 STOPSIGNAL SIGTERM

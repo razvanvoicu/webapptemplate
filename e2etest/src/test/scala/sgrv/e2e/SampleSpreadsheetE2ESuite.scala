@@ -14,7 +14,10 @@ import scala.jdk.CollectionConverters.*
   * `e2etest/testAuthenticated`, not `e2etest/test`.
   */
 class SampleSpreadsheetE2ESuite extends munit.FunSuite:
-  private val baseUrl = sys.props.getOrElse("e2e.baseUrl", "http://localhost:8888")
+  private val baseUrl = sys.props
+    .get("e2e.baseUrl")
+    .orElse(sys.env.get("E2E_BASE_URL"))
+    .getOrElse(throw new IllegalStateException("E2E_BASE_URL is not configured"))
   private val debuggerAddress = sys.props.getOrElse("e2e.debuggerAddress", "127.0.0.1:9222")
   private var driver: ChromeDriver = scala.compiletime.uninitialized
 

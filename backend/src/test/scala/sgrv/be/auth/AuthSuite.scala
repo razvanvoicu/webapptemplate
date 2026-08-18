@@ -8,9 +8,9 @@ import zio.http.{Path, Method as ZioMethod}
 class AuthSuite extends munit.FunSuite:
 
   test("validates and normalizes the configured public base URL"):
-    assertEquals(AppConfig.validatePublicBaseUrl("http://localhost:8888/"), Right("http://localhost:8888"))
-    assertEquals(AppConfig.validatePublicBaseUrl("http://127.0.0.1:8888"), Right("http://127.0.0.1:8888"))
-    assertEquals(AppConfig.validatePublicBaseUrl("http://[::1]:8888"), Right("http://[::1]:8888"))
+    assertEquals(AppConfig.validatePublicBaseUrl("http://localhost:8123/"), Right("http://localhost:8123"))
+    assertEquals(AppConfig.validatePublicBaseUrl("http://127.0.0.1:8123"), Right("http://127.0.0.1:8123"))
+    assertEquals(AppConfig.validatePublicBaseUrl("http://[::1]:8123"), Right("http://[::1]:8123"))
     assertEquals(AppConfig.validatePublicBaseUrl("https://APP.EXAMPLE.COM:8443"), Right("https://app.example.com:8443"))
 
   test("rejects unsafe or ambiguous public base URLs"):
@@ -25,11 +25,11 @@ class AuthSuite extends munit.FunSuite:
     ).foreach(value => assert(AppConfig.validatePublicBaseUrl(value).isLeft, value))
 
   test("builds the Google authorization URL with encoded parameters"):
-    val url = GoogleOAuth.authorizationUrl("client-1", "http://localhost:8888/auth/callback", "state/value")
+    val url = GoogleOAuth.authorizationUrl("client-1", "http://localhost:8123/auth/callback", "state/value")
 
     assert(url.startsWith("https://accounts.google.com/o/oauth2/v2/auth?"))
     assert(url.contains("client_id=client-1"))
-    assert(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8888%2Fauth%2Fcallback"))
+    assert(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8123%2Fauth%2Fcallback"))
     assert(url.contains("response_type=code"))
     assert(url.contains("scope=openid+email+profile"))
     assert(url.contains("state=state%2Fvalue"))
@@ -39,7 +39,7 @@ class AuthSuite extends munit.FunSuite:
   test("appends configured Google service scopes to the authorization URL"):
     val url = GoogleOAuth.authorizationUrl(
       "client-1",
-      "http://localhost:8888/auth/callback",
+      "http://localhost:8123/auth/callback",
       "state",
       extraScopes = Seq("https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file")
     )
