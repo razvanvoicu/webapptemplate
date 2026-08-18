@@ -35,6 +35,7 @@ class SampleSpreadsheetE2ESuite extends munit.FunSuite:
     driver.get(baseUrl)
     val wait = new WebDriverWait(driver, Duration.ofSeconds(20))
 
+    assertEquals(driver.findElement(By.cssSelector(".logout-link")).getText, "Logout")
     wait.until(ExpectedConditions.elementToBeClickable(By.cssSelector(".about-link"))).click()
     val dialog = wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".about-dialog")))
     val labels = dialog.findElements(By.cssSelector(".about-details dt")).asScala.map(_.getText).toSeq

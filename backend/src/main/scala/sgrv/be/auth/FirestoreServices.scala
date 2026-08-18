@@ -130,6 +130,7 @@ trait SessionStore:
       expiresAt: Instant
   ): Task[Unit]
   def find(sessionKey: String, now: Instant): Task[Option[SessionUser]]
+  def invalidate(sessionKey: String): Task[Unit]
 
 private[be] object SessionStore:
   def create(
@@ -142,6 +143,9 @@ private[be] object SessionStore:
 
   def find(sessionKey: String, now: Instant): ZIO[SessionStore, Throwable, Option[SessionUser]] =
     ZIO.serviceWithZIO[SessionStore](_.find(sessionKey, now))
+
+  def invalidate(sessionKey: String): ZIO[SessionStore, Throwable, Unit] =
+    ZIO.serviceWithZIO[SessionStore](_.invalidate(sessionKey))
 
   val live: ZLayer[AppConfig, Throwable, SessionStore] =
     ZLayer.scoped:
@@ -187,9 +191,18 @@ private[be] object SessionStore:
                   val email = normalized(session.getString("email"))
                   val name = normalized(session.getString("name"))
                   val refreshToken = normalized(session.getString("refreshToken"))
+                  val accessTokenForRevocation = normalized(session.getString("accessTokenForRevocation"))
                   if storedKey.contains(key) && expiresAt.exists(now.isBefore) then
-                    email.map(address => SessionUser(address, name.getOrElse(address), refreshToken))
+                    email.map(address =>
+                      SessionUser(address, name.getOrElse(address), refreshToken, accessTokenForRevocation)
+                    )
                   else None
+
+    override def invalidate(sessionKey: String): Task[Unit] =
+      normalized(sessionKey) match
+        case None      => ZIO.fail(new IllegalArgumentException("The session key is empty"))
+        case Some(key) =>
+          GoogleFuture.fromApiFuture(firestore.collection(SessionSchema.collection).document(key).delete()).unit
 
   private[auth] def documentFields(
       sessionKey: String,
@@ -204,6 +217,7 @@ private[be] object SessionStore:
     values.put("sessionKey", sessionKey)
     values.put(SessionSchema.expiresAt, timestamp(expiresAt))
     user.refreshToken.foreach(value => values.put("refreshToken", value))
+    user.accessTokenForRevocation.foreach(value => values.put("accessTokenForRevocation", value))
     values
 
   private def normalized(value: String): Option[String] =

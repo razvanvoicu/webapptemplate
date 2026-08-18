@@ -141,7 +141,7 @@ class AuthSuite extends munit.FunSuite:
     assert(!DatabaseAdmin.sessionTtlNeedsUpdate(creating))
     assert(DatabaseAdmin.sessionTtlNeedsUpdate(needsRepair))
 
-  test("persists the refresh token carried by SessionUser"):
+  test("persists the OAuth tokens carried by SessionUser without duplicating them"):
     val createdAt = Instant.parse("2026-08-16T00:00:00Z")
     val expiresAt = Instant.parse("2026-08-23T00:00:00Z")
     val withToken = SessionStore.documentFields(
@@ -156,13 +156,24 @@ class AuthSuite extends munit.FunSuite:
       createdAt,
       expiresAt
     )
+    val withRevocationFallback = SessionStore.documentFields(
+      "session-key",
+      SessionUser("jane@example.com", "Jane", accessTokenForRevocation = Some("access-token")),
+      createdAt,
+      expiresAt
+    )
 
     assertEquals(withToken.get("refreshToken"), "refresh-token")
+    assert(!withToken.containsKey("accessTokenForRevocation"))
     assert(!withoutToken.containsKey("refreshToken"))
+    assert(!withoutToken.containsKey("accessTokenForRevocation"))
+    assertEquals(withRevocationFallback.get("accessTokenForRevocation"), "access-token")
+    assert(!withRevocationFallback.containsKey("refreshToken"))
 
   test("auth plugins expose their native typed routes"):
     Seq(
       Login.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/auth/login"))),
       Callback.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/auth/callback"))),
-      Me.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/me")))
+      Me.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/me"))),
+      Logout.routes.routes.exists(_.routePattern.matches(ZioMethod.POST, Path("/logout")))
     ).foreach(assert(_))

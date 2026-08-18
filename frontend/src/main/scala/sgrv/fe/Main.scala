@@ -31,6 +31,11 @@ object Main:
     case Loaded(information: AboutInfo)
     case Failed(message: String)
 
+  private enum LogoutState:
+    case Idle
+    case InProgress
+    case Failed(message: String)
+
   import UserState.*
   import SheetState.*
 
@@ -39,6 +44,7 @@ object Main:
     val sheetName = Var("")
     val sheetState = Var[SheetState](Idle)
     val aboutState = Var[AboutState](AboutState.Closed)
+    val logoutState = Var[LogoutState](LogoutState.Idle)
 
     dom
       .fetch("/me")
@@ -74,16 +80,41 @@ object Main:
           aboutState.set(AboutState.Failed(message))
         case _ => ()
 
+    def logout(): Unit =
+      if logoutState.now() != LogoutState.InProgress then
+        logoutState.set(LogoutState.InProgress)
+        requestLogout().onComplete:
+          case Success(_) =>
+            aboutState.set(AboutState.Closed)
+            sheetState.set(Idle)
+            user.set(Unauthenticated)
+            dom.window.location.assign("/")
+          case Failure(error) =>
+            val message = Option(error.getMessage).map(_.trim).filter(_.nonEmpty).getOrElse("The request failed.")
+            logoutState.set(LogoutState.Failed(message))
+
     val app =
       div(
         cls := "app",
         child <-- user.signal.map {
           case SignedIn(_, _) =>
-            a(
-              cls := "about-link",
-              href := "/about",
-              onClick.preventDefault --> { _ => openAbout() },
-              "About"
+            div(
+              cls := "user-actions",
+              a(
+                cls := "about-link",
+                href := "/about",
+                onClick.preventDefault --> { _ => openAbout() },
+                "About"
+              ),
+              button(
+                cls := "logout-link",
+                typ := "button",
+                disabled <-- logoutState.signal.map(_ == LogoutState.InProgress),
+                child.text <-- logoutState.signal.map:
+                  case LogoutState.InProgress => "Logging out…"
+                  case _                      => "Logout",
+                onClick --> { _ => logout() }
+              )
             )
           case _ => emptyNode
         },
@@ -103,6 +134,9 @@ object Main:
               p(cls := "error", s"Authentication failed: $message") // Error message if authentication fails
           }
         ),
+        child <-- logoutState.signal.map:
+          case LogoutState.Failed(message) => p(cls := "error logout-error", s"Logout failed: $message")
+          case _                           => emptyNode,
         child <-- user.signal.map {
           case SignedIn(_, _) =>
             div(
@@ -210,6 +244,19 @@ object Main:
     dom.fetch(url, init).flatMap { response =>
       if response.ok then Future.successful(())
       else response.text().flatMap(text => Future.failed(new RuntimeException(s"${response.status}: $text")))
+    }
+
+  private def requestLogout(): Future[Unit] =
+    val init = new dom.RequestInit:
+      method = dom.HttpMethod.POST
+    dom.fetch("/logout", init).flatMap { response =>
+      if response.ok then Future.successful(())
+      else
+        response
+          .text()
+          .flatMap: text =>
+            val details = Option(text).map(_.trim).filter(_.nonEmpty).getOrElse(s"HTTP ${response.status}")
+            Future.failed(new RuntimeException(details))
     }
 
   private def fetchAbout(): Future[AboutInfo] =

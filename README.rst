@@ -32,9 +32,10 @@ Once signed in, a small form appears under the greeting exercising the Google Sh
 to find-or-create that spreadsheet in the signed-in user's Google Drive, append a row recording the request's
 server timestamp and the browser's User-Agent, and display the spreadsheet's current content in a table.
 
-An "About" link also appears in the upper-right corner after sign-in. It opens a centered modal and fetches the
-app version, UTC build timestamp, build operating system, Scala version, and Scala.js version from the
-authenticated ``GET /about`` route.
+"About" and "Logout" controls also appear in the upper-right corner after sign-in. About opens a centered modal
+and fetches the app version, UTC build timestamp, build operating system, Scala version, and Scala.js version from
+the authenticated ``GET /about`` route. Logout invokes ``POST /logout`` and returns the browser to the signed-out
+home page only after the server has revoked the Google grant and removed the browser session.
 
 The backend owns the static-file routes, but application API routes are not
 coupled to ``Main``. ``RouteDiscovery`` scans the ``sgrv.be`` package on the
@@ -124,6 +125,9 @@ Routes and caching
    * - ``/me``
      - Signed-in user as JSON, or ``401``
      - ``no-store``
+   * - ``POST /logout``
+     - Revokes Google authorization, deletes the Firestore session, and expires authentication cookies
+     - ``no-store``
    * - ``GET /about``
      - Authenticated build metadata as JSON
      - ``no-store``
@@ -137,9 +141,10 @@ Routes and caching
 Each plugin declares an ``AccessPolicy``; see `Adding a backend plugin`_. ``/auth/login``, ``/auth/callback``, and
 ``/me`` use ``AccessPolicy.Public`` because they must serve visitors without an existing session. When linked,
 the Debug plugin uses ``AuthenticatedAndAdminPassword``, so reaching ``/debug`` needs both a session and the
-admin password (`Admin-protected routes`_). The About and Sheets plugins use ``Authenticated``; About reports
-packaged build metadata, while Sheets consumes the resulting authenticated request context to reach the signed-in
-user's stored Google refresh token
+admin password (`Admin-protected routes`_). Logout, About, and Sheets use ``Authenticated``. Logout revokes the
+already-resolved user's Google credentials and invalidates the current session without a second Firestore lookup;
+About reports packaged build metadata, while Sheets consumes the resulting authenticated request context to reach
+the signed-in user's stored Google refresh token
 (`Google service entitlements (Sheets)`_). Static routes
 (``/``, ``/index.html``, ``/style.css``, ``/main.js``, ``/main.js.map``) are wired directly in ``Main`` and are
 reserved against dynamically loaded route conflicts.
@@ -228,6 +233,17 @@ JavaScript. The HttpOnly attribute also prevents JavaScript from reading the
 session key, although same-origin JavaScript can still issue requests carrying
 the cookie.
 
+After sign-in, the frontend's Logout control sends an authenticated ``POST /logout``. The backend first posts the
+stored refresh token to Google's OAuth revocation endpoint; if Google issued no refresh token at login, the access
+token retained solely for this fallback is revoked instead. An already expired or revoked token is treated as an
+idempotent success. It then deletes the current ``Access`` document and returns ``204 No Content`` with expired
+``session`` and ``auth_state`` cookies. The frontend reloads ``/``, where ``GET /me`` produces ``401`` and the login
+link is shown again. Google revocation is intentionally performed before Firestore deletion: if Google or Firestore
+is temporarily unavailable, the server returns a stable error, leaves the cookie/session available, and lets the
+user retry instead of losing the only stored revocation credential before it can be revoked. Successful revocation removes
+the OAuth scopes granted to this project and invalidates its issued access and refresh tokens; it does not sign the
+user out of their Google account itself.
+
 The Google and Firestore SDKs are isolated behind ZIO service interfaces.
 ``AppConfig`` loads and validates deployment settings as an effect;
 ``GoogleOAuth``, ``SessionStore``, ``DatabaseAdmin``, and ``TokenGenerator``
@@ -279,10 +295,11 @@ Each document in the ``Access`` collection represents one browser session. Its
 document ID is a random 256-bit URL-safe session key, which is also stored in
 the ``sessionKey`` field. The other fields are ``email``, ``name``,
 ``createdAt``, and ``expiresAt``. If Google returns an OAuth refresh token, it
-is stored as ``refreshToken``; otherwise that field is omitted. A protected
+is stored as ``refreshToken``. Otherwise the short-lived access token is stored as ``accessTokenForRevocation``
+solely so Logout can revoke the grant; the two fields are never populated together. A protected
 request is authenticated by looking up the cookie's session key and rejecting
-missing or expired records. Deleting one document revokes only that browser
-session. There is no process-global encryption key and backend restarts do not
+missing or expired records. A successful logout deletes the current document, revoking only that browser session,
+after revoking the associated Google grant. There is no process-global encryption key and backend restarts do not
 invalidate sessions; Firestore is the durable session store. Treat document
 IDs, ``sessionKey``, and ``refreshToken`` values as secrets.
 
@@ -298,7 +315,7 @@ to the frontend as an unauthenticated session.
 The session cookie is HttpOnly, ``SameSite=Lax``, scoped to ``/``, and expires
 after seven days. It is marked Secure when the callback is served over HTTPS.
 The OAuth ``state`` cookie has the same browser protections and expires after
-ten minutes.
+ten minutes. Successful logout explicitly expires both cookies using their original paths.
 
 Testing against a local Firestore emulator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -532,9 +549,10 @@ The frontend tests need Node.js installed; without it, run ``sbt backend/test`` 
 The backend and Debug-plugin tests cover server configuration and static assets; nominal plugin discovery; typed intersection
 capability resolution; missing-capability skips; access-policy gating; API incompatibility, activation-failure,
 and route-conflict isolation; request-log formatting; debug signature generation; OAuth configuration and URL generation (including
-``GOOGLE_SERVICES`` parsing and the resulting scope list), user-name fallback, authentication JSON, discovery of
-the authentication and Sheets routes, and the Sheets routes' JSON request/response helpers. They use deterministic
-test data; they do not call Google or a live Firestore/Sheets/Drive API. Generate an scoverage report for the
+``GOOGLE_SERVICES`` parsing and the resulting scope list), user-name fallback, authentication JSON, logout
+revocation/invalidation ordering and cookie expiry, discovery of the authentication and Sheets routes, and the
+Sheets routes' JSON request/response helpers. They use deterministic test data; they do not call Google or a live
+Firestore/Sheets/Drive API. Generate an scoverage report for the
 backend with:
 
 .. code-block:: console

@@ -41,6 +41,8 @@ class AboutSuite extends munit.FunSuite:
           lookups.incrementAndGet()
           Option.when(sessionKey == "valid-session")(SessionUser("jane@example.com", "Jane"))
 
+      override def invalidate(sessionKey: String): Task[Unit] = ZIO.unit
+
     val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(store))
     val routes = RouteDiscovery.activate(About, About.getClass.getName, registry) match
       case PluginStatus.Active(_, _, activeRoutes) => activeRoutes

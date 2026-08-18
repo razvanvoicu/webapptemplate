@@ -6,13 +6,21 @@ import com.google.api.client.googleapis.auth.oauth2.{
   GoogleRefreshTokenRequest
 }
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport
-import com.google.api.client.http.HttpTransport
+import com.google.api.client.http.{GenericUrl, HttpResponseException, HttpTransport, UrlEncodedContent}
 import com.google.api.client.json.gson.GsonFactory
+import com.google.gson.JsonParser
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets.UTF_8
+import java.util.Collections
+import scala.util.Try
 import zio.{Task, UIO, ZIO, ZLayer}
 
-final case class SessionUser(email: String, name: String, refreshToken: Option[String] = None)
+final case class SessionUser(
+    email: String,
+    name: String,
+    refreshToken: Option[String] = None,
+    accessTokenForRevocation: Option[String] = None
+)
 final case class GoogleAuthentication(user: SessionUser)
 
 /** ZIO boundary around the Google OAuth client library. */
@@ -21,6 +29,7 @@ trait GoogleOAuth:
   def authenticate(code: String): Task[GoogleAuthentication]
   def callbackIsSecure: UIO[Boolean]
   def accessToken(refreshToken: String): Task[String]
+  def revoke(refreshToken: String): Task[Unit]
 
 private[be] object GoogleOAuth:
   private val authorizationEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -40,6 +49,10 @@ private[be] object GoogleOAuth:
     */
   def accessToken(refreshToken: String): ZIO[GoogleOAuth, Throwable, String] =
     ZIO.serviceWithZIO[GoogleOAuth](_.accessToken(refreshToken))
+
+  /** Revokes the stored refresh token and its Google OAuth grant. */
+  def revoke(refreshToken: String): ZIO[GoogleOAuth, Throwable, Unit] =
+    ZIO.serviceWithZIO[GoogleOAuth](_.revoke(refreshToken))
 
   val live: ZLayer[AppConfig, Throwable, GoogleOAuth] =
     ZLayer.scoped:
@@ -79,8 +92,18 @@ private[be] object GoogleOAuth:
           .getOrElse(throw new IllegalStateException("The Google ID token carries no email address"))
         if payload.getEmailVerified != java.lang.Boolean.TRUE then
           throw new IllegalStateException(s"Google reports $email as unverified")
+        val accessToken = Option(tokenResponse.getAccessToken)
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .getOrElse(throw new IllegalStateException("Google returned no access token"))
         val refreshToken = Option(tokenResponse.getRefreshToken).map(_.trim).filter(_.nonEmpty)
-        val user = SessionUser(email, displayName(Option(payload.get("name")).map(_.toString), email), refreshToken)
+        val accessTokenForRevocation = Option.when(refreshToken.isEmpty)(accessToken)
+        val user = SessionUser(
+          email,
+          displayName(Option(payload.get("name")).map(_.toString), email),
+          refreshToken,
+          accessTokenForRevocation
+        )
         GoogleAuthentication(user)
 
     override def callbackIsSecure: UIO[Boolean] = ZIO.succeed(config.callbackIsSecure)
@@ -94,6 +117,19 @@ private[be] object GoogleOAuth:
           .map(_.trim)
           .filter(_.nonEmpty)
           .getOrElse(throw new IllegalStateException("Google returned no access token for the stored refresh token"))
+
+    override def revoke(refreshToken: String): Task[Unit] =
+      ZIO
+        .attemptBlocking:
+          val content = new UrlEncodedContent(Collections.singletonMap("token", refreshToken))
+          val response = transport
+            .createRequestFactory()
+            .buildPostRequest(new GenericUrl(GoogleOAuth.revocationEndpoint), content)
+            .execute()
+          try ()
+          finally response.disconnect()
+        .catchSome:
+          case error: HttpResponseException if GoogleOAuth.isAlreadyRevoked(error) => ZIO.unit
 
   private[auth] def authorizationUrl(
       clientId: String,
@@ -122,3 +158,12 @@ private[be] object GoogleOAuth:
         email.takeWhile(_ != '@') match
           case ""          => email
           case mailboxName => mailboxName
+
+  private val revocationEndpoint = "https://oauth2.googleapis.com/revoke"
+
+  private[auth] def isAlreadyRevoked(error: HttpResponseException): Boolean =
+    error.getStatusCode == 400 &&
+      Option(error.getContent)
+        .flatMap: content =>
+          Try(JsonParser.parseString(content).getAsJsonObject.get("error").getAsString).toOption
+        .contains("invalid_token")

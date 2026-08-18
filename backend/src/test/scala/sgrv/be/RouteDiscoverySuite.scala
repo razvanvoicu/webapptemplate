@@ -70,6 +70,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
 
     override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] = ZIO.none
 
+    override def invalidate(sessionKey: String): Task[Unit] = ZIO.unit
+
   private val sessionRegistry = CapabilityRegistry.fromEnvironment(ZEnvironment(sessionStore))
 
   private def run[A](effect: Task[A]): A =
@@ -125,6 +127,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
           lookups.incrementAndGet()
           Option.when(sessionKey == "session-key")(user)
 
+      override def invalidate(sessionKey: String): Task[Unit] = ZIO.unit
+
     val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore))
     val status = RouteDiscovery.activate(ProtectedEchoPlugin, ProtectedEchoPlugin.getClass.getName, registry)
     val routes = RouteDiscovery.fromStatuses(Seq(status))
@@ -153,6 +157,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
           lookups.incrementAndGet()
           Option.when(sessionKey == "session-key")(user)
 
+      override def invalidate(sessionKey: String): Task[Unit] = ZIO.unit
+
     val googleOAuth: GoogleOAuth = new GoogleOAuth:
       override def authorizationUrl(state: String): UIO[String] = ZIO.succeed("")
       override def authenticate(code: String): Task[GoogleAuthentication] =
@@ -160,6 +166,7 @@ class RouteDiscoverySuite extends munit.FunSuite:
       override def callbackIsSecure: UIO[Boolean] = ZIO.succeed(true)
       override def accessToken(refreshToken: String): Task[String] =
         ZIO.fail(new AssertionError("Sheets must reject the missing refresh token before requesting an access token"))
+      override def revoke(refreshToken: String): Task[Unit] = ZIO.unit
 
     RouteDiscovery.activate(
       SpreadsheetContent,

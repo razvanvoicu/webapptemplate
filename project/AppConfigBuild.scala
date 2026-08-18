@@ -50,9 +50,12 @@ object AppConfigBuild {
           case _ => sys.error(s"Malformed configuration at ${file.getAbsolutePath}:$lineNumber; expected NAME=value")
         }
       }
-    val duplicates = entries.groupBy(_._1).collect {
-      case (name, occurrences) if occurrences.size > 1 => name
-    }.toSeq
+    val duplicates = entries
+      .groupBy(_._1)
+      .collect {
+        case (name, occurrences) if occurrences.size > 1 => name
+      }
+      .toSeq
     if (duplicates.nonEmpty)
       sys.error(s"Duplicate settings in ${file.getAbsolutePath}: ${duplicates.sorted.mkString(", ")}")
     val unknown = entries.map(_._1).toSet -- supportedKeys
