@@ -175,5 +175,6 @@ class AuthSuite extends munit.FunSuite:
       Login.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/auth/login"))),
       Callback.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/auth/callback"))),
       Me.routes.routes.exists(_.routePattern.matches(ZioMethod.GET, Path("/me"))),
+      RefreshSession.routes.routes.exists(_.routePattern.matches(ZioMethod.POST, Path("/refreshSession"))),
       Logout.routes.routes.exists(_.routePattern.matches(ZioMethod.POST, Path("/logout")))
     ).foreach(assert(_))

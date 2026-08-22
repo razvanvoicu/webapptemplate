@@ -176,6 +176,10 @@ body {
   margin: 0;
 }
 
+.session-expired-message {
+  margin: 0;
+}
+
 .error {
   color: #c0392b;
 }

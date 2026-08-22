@@ -52,7 +52,7 @@ from those generic facilities. Consequently, adding a plugin does not require ad
 
 The Scala.js linker runs as a backend resource generator. Its ``main.js`` and
 source map are copied into the backend's managed ``web`` resources beside the
-hand-written ``index.html`` and ``style.css`` files. Consequently, one backend
+hand-written HTML, CSS, web-app manifest, favicon, and PWA icons. Consequently, one backend
 build contains and serves the complete application. A second resource generator captures the version, build
 timestamp, build OS, Scala version, and Scala.js plugin version in a packaged ``build-info.properties`` resource
 for ``/about``.
@@ -74,6 +74,12 @@ The server binds to IPv4 loopback (``127.0.0.1``). ``sbt run`` derives ``PORT``
 from the explicit port in ``LOCAL_BASE_URL``. The backend has no port default and
 does not accept a command-line port: a missing, non-numeric, or out-of-range
 ``PORT`` stops startup with a clear configuration error.
+
+Static-file expiry has no compiled-in default. ``test.env`` explicitly sets
+``STATIC_ASSET_CACHE_MAX_AGE_SECONDS=300`` for the local ``run`` task, while ``prod.env`` sets it to ``86400``
+(one day) for both the standalone ``artifact`` image and ``deployGCloud``. A missing, non-numeric, or negative
+value stops startup with a configuration error. ``index.html`` remains ``no-cache`` so a launch can discover a
+new application build.
 
 On Windows, the development server can be stopped by port with:
 
@@ -106,13 +112,22 @@ Routes and caching
      - ``no-cache``
    * - ``/style.css``
      - Hand-written stylesheet
-     - 5 minutes
+     - 5 minutes for ``run``; 1 day for production images
+   * - ``/favicon.ico``
+     - Packaged application icon
+     - 5 minutes for ``run``; 1 day for production images
+   * - ``/icon-192.png`` / ``/icon-512.png``
+     - Installable-app icons declared by the web-app manifest
+     - 5 minutes for ``run``; 1 day for production images
+   * - ``/manifest.webmanifest``
+     - PWA identity, launch behavior, colors, and icons
+     - 5 minutes for ``run``; 1 day for production images
    * - ``/main.js``
      - Linked Scala.js application
-     - 5 minutes
+     - 5 minutes for ``run``; 1 day for production images
    * - ``/main.js.map``
      - Scala.js source map
-     - 5 minutes
+     - 5 minutes for ``run``; 1 day for production images
    * - ``/debug``
      - Conditional Debug-plugin route; backend system signature requiring sign-in and ``?pwd=``
      - ``no-store``
@@ -124,6 +139,9 @@ Routes and caching
      - Default
    * - ``/me``
      - Signed-in user as JSON, or ``401``
+     - ``no-store``
+   * - ``POST /refreshSession``
+     - Validates the stored Google refresh token; renews Firestore/cookie expiry and reports that expiry in a header
      - ``no-store``
    * - ``POST /logout``
      - Revokes Google authorization, deletes the Firestore session, and expires authentication cookies
@@ -141,13 +159,61 @@ Routes and caching
 Each plugin declares an ``AccessPolicy``; see `Adding a backend plugin`_. ``/auth/login``, ``/auth/callback``, and
 ``/me`` use ``AccessPolicy.Public`` because they must serve visitors without an existing session. When linked,
 the Debug plugin uses ``AuthenticatedAndAdminPassword``, so reaching ``/debug`` needs both a session and the
-admin password (`Admin-protected routes`_). Logout, About, and Sheets use ``Authenticated``. Logout revokes the
+admin password (`Admin-protected routes`_). Session refresh is public so it can recover an expired session; it
+requires the opaque cookie and a still-valid stored Google refresh token before extending Firestore and reissuing
+the ``HttpOnly`` cookie. Logout, About, and Sheets use ``Authenticated``. Logout revokes the
 already-resolved user's Google credentials and invalidates the current session without a second Firestore lookup;
 About reports packaged build metadata, while Sheets consumes the resulting authenticated request context to reach
 the signed-in user's stored Google refresh token
 (`Google service entitlements (Sheets)`_). Static routes
-(``/``, ``/index.html``, ``/style.css``, ``/main.js``, ``/main.js.map``) are wired directly in ``Main`` and are
+(``/``, ``/index.html``, ``/favicon.ico``, both PWA icons, ``/manifest.webmanifest``,
+``/style.css``, ``/main.js``, and ``/main.js.map``) are wired directly in ``Main`` and are
 reserved against dynamically loaded route conflicts.
+
+The Scala.js frontend continues to use ``/me`` as its read-only startup check. A successful result enables the
+Scala-written ``SessionRefreshWorker``, which renews immediately and reads ``X-Session-Expires-At`` from the
+response. It schedules its next renewal five minutes before that expiry; the lead time is a constructor setting,
+while transient non-``401`` failures retry after one minute. Logout disables the worker before contacting the
+backend.
+
+Application UI state is an immutable, typed ``FrontendState`` snapshot encoded with ``zio-json`` under the browser
+``localStorage`` key ``sgrv.frontend-state.v2``. A locally scoped ``FrontendStateStore`` given owns both persistence
+and Laminar's reactive projection, so DOM updates remain declarative and the two representations cannot be updated
+separately. On page load, transient operations are normalized and authentication returns to ``Unknown`` until
+``/me`` confirms the HttpOnly cookie against the backend; persisted state is never treated as proof of
+authentication.
+
+Session-renewal infrastructure lives separately in ``sgrv.fe.refreshstate`` and persists only ``RefreshState``
+under ``sgrv.refresh-state.v1``. That package has no dependency on Sheets or any other application-specific state,
+so a fork can replace the example application without modifying session refresh. Browser-only resources such as
+timeout handles are not serialized. Instead, scheduled refresh callbacks validate a persisted generation before
+acting, so disabling or replacing a worker makes older callbacks harmless.
+
+Every frontend request passes through the stateless ``HttpService``. It reports every ``401`` to the session
+lifecycle owner; that owner reacts only while persisted session monitoring is active. Consequently the expected
+initial ``/me`` response can still represent an ordinary signed-out visitor, while the first relevant ``401`` from
+the renewal worker or any other HTTP call disables the worker, clears authenticated UI state, and opens a
+session-expired modal. Requests are not implicitly retried and the modal does not initiate OAuth; reloading returns
+to the normal login page. New frontend routes inherit this behavior by using ``HttpService`` rather than calling
+``dom.fetch`` directly.
+
+A missing cookie, missing retained Firestore record, missing refresh token, or Google refresh rejection produces
+``401``. Firestore failures produce ``503`` instead. Renewal can only recover a record that Firestore TTL has not
+yet deleted and for which the browser still supplies the opaque cookie; scheduled renewal normally extends both
+before they expire.
+
+PWA installation
+----------------
+
+The application is installable from supporting browsers. ``index.html`` declares ``manifest.webmanifest``, the
+192×192 and 512×512 PNG icons, theme colors, and an Apple touch icon. The manifest launches the installed
+application at ``/`` in a standalone window. Installation does not enable application-shell or offline caching;
+the app needs a connection to launch and use backend data.
+
+Installation requires HTTPS in a deployed environment; browsers also accept ``localhost`` and ``127.0.0.1`` for
+local development. Use the browser's install action after loading the application. Both image-building tasks
+verify that the manifest, favicon, and required PNG icons are present in the packaged backend JAR before
+staging their Docker context.
 
 Login with Google
 -----------------
@@ -852,7 +918,9 @@ Worth changing, but not load-bearing
 * ``ThisBuild / organization`` / ``organizationName`` and the three ``name`` settings in ``build.sbt``
   (``webapptemplate``, ``webapptemplate-frontend``, ``webapptemplate-backend``) — cosmetic, but they name your
   build artifacts and Docker image tags (the root project's ``name`` specifically).
-* The ``<title>`` in ``backend/src/main/resources/web/index.html`` — currently "Web App Template".
+* The ``<title>`` and Apple app title in ``backend/src/main/resources/web/index.html``, plus ``name``,
+  ``short_name``, ``description``, and colors in ``backend/src/main/resources/web/manifest.webmanifest`` — these
+  control the installed app's identity and launch appearance. Replace the favicon and both PNG icons as a set.
 * The ``sgrv.be`` / ``sgrv.fe`` package names. Purely a naming choice, but if you rename them, also update
   ``RouteDiscovery.discover``'s ``.acceptPackages("sgrv.be")`` filter in
   ``backend/src/main/scala/sgrv/be/core/RouteDiscovery.scala`` to match — otherwise route discovery silently

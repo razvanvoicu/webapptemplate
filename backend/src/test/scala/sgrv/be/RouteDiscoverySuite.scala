@@ -70,6 +70,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
 
     override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] = ZIO.none
 
+    override def findForRefresh(sessionKey: String): Task[Option[SessionUser]] = ZIO.none
+    override def renew(sessionKey: String, expiresAt: Instant): Task[Unit] = ZIO.unit
     override def invalidate(sessionKey: String): Task[Unit] = ZIO.unit
 
   private val sessionRegistry = CapabilityRegistry.fromEnvironment(ZEnvironment(sessionStore))
@@ -127,6 +129,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
           lookups.incrementAndGet()
           Option.when(sessionKey == "session-key")(user)
 
+      override def findForRefresh(sessionKey: String): Task[Option[SessionUser]] = ZIO.none
+      override def renew(sessionKey: String, expiresAt: Instant): Task[Unit] = ZIO.unit
       override def invalidate(sessionKey: String): Task[Unit] = ZIO.unit
 
     val registry = CapabilityRegistry.fromEnvironment(ZEnvironment(countingStore))
@@ -157,6 +161,8 @@ class RouteDiscoverySuite extends munit.FunSuite:
           lookups.incrementAndGet()
           Option.when(sessionKey == "session-key")(user)
 
+      override def findForRefresh(sessionKey: String): Task[Option[SessionUser]] = ZIO.none
+      override def renew(sessionKey: String, expiresAt: Instant): Task[Unit] = ZIO.unit
       override def invalidate(sessionKey: String): Task[Unit] = ZIO.unit
 
     val googleOAuth: GoogleOAuth = new GoogleOAuth:

@@ -15,10 +15,17 @@ private[be] object Config:
       extends IllegalArgumentException(
         s"Invalid port configuration from $source: '$value'. Expected an integer from 1 to 65535."
       )
+  final case class MissingStaticAssetCacheMaxAge()
+      extends IllegalArgumentException(
+        "Environment variable STATIC_ASSET_CACHE_MAX_AGE_SECONDS is not set or is empty; startup cannot continue."
+      )
+  final case class InvalidStaticAssetCacheMaxAge(value: String)
+      extends IllegalArgumentException(
+        s"Invalid STATIC_ASSET_CACHE_MAX_AGE_SECONDS value '$value'. Expected a non-negative integer."
+      )
   // 127.0.0.1 suits a same-host reverse proxy or bare-VM deployment; a container needs 0.0.0.0 (see BIND_ADDRESS
   // below), since a process bound only to loopback is unreachable from outside its own network namespace.
   val defaultBindAddress = "127.0.0.1"
-  val staticCacheCtrl = Header.CacheControl.MaxAge(300)
 
 private[be] object LoggerConfig:
   private val request = LogFormat.make: (builder, _, _, _, _, _, _, _, annotations) =>
@@ -40,13 +47,13 @@ object Main extends ZIOAppDefault:
   import LoggerConfig.*
   import Body.fromArray
   import zio.http.Header.{CacheControl, ContentType}
-  import MediaType.{text, application}
+  import MediaType.{application, image, text}
   import Status.{NotFound, InternalServerError}
 
   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] = Runtime.removeDefaultLoggers >>> consoleLogger(loggerConfig)
   override val gracefulShutdownTimeout: Duration = processShutdownTimeout
 
-  private[be] def asset(fName: String, mediaType: MediaType, cacheCtrl: CacheControl = staticCacheCtrl): UIO[Response] =
+  private[be] def asset(fName: String, mediaType: MediaType, cacheCtrl: CacheControl): UIO[Response] =
     val makeResponse: Option[Array[Byte]] => Response =
       case Some(bytes) => Response(headers = Headers(ContentType(mediaType), cacheCtrl), body = fromArray(bytes))
       case None        => Response.status(NotFound)
@@ -62,12 +69,17 @@ object Main extends ZIOAppDefault:
 
   private val index = asset("index.html", text.html, CacheControl.NoCache)
 
-  private[be] def staticRoutes = Routes(
+  private[be] def staticRoutes(staticCacheCtrl: CacheControl) = Routes(
     Method.GET / "" -> handler(index),
     Method.GET / "index.html" -> handler(index),
-    Method.GET / "style.css" -> handler(asset("style.css", text.css)),
-    Method.GET / "main.js" -> handler(asset("main.js", text.javascript)),
-    Method.GET / "main.js.map" -> handler(asset("main.js.map", application.json))
+    Method.GET / "favicon.ico" -> handler(asset("favicon.ico", image.`vnd.microsoft.icon`, staticCacheCtrl)),
+    Method.GET / "icon-192.png" -> handler(asset("icon-192.png", image.png, staticCacheCtrl)),
+    Method.GET / "icon-512.png" -> handler(asset("icon-512.png", image.png, staticCacheCtrl)),
+    Method.GET / "manifest.webmanifest" ->
+      handler(asset("manifest.webmanifest", application.`manifest+json`, staticCacheCtrl)),
+    Method.GET / "style.css" -> handler(asset("style.css", text.css, staticCacheCtrl)),
+    Method.GET / "main.js" -> handler(asset("main.js", text.javascript, staticCacheCtrl)),
+    Method.GET / "main.js.map" -> handler(asset("main.js.map", application.json, staticCacheCtrl))
   )
 
   private def port: IO[IllegalArgumentException, Int] =
@@ -78,6 +90,18 @@ object Main extends ZIOAppDefault:
       case None        => Left(MissingPort())
       case Some(value) =>
         value.toIntOption.filter(port => port >= 1 && port <= 65535).toRight(InvalidPort("PORT", value))
+
+  private def staticCacheControl: IO[IllegalArgumentException, CacheControl] =
+    System
+      .env("STATIC_ASSET_CACHE_MAX_AGE_SECONDS")
+      .orElseSucceed(None)
+      .flatMap(environmentValue => ZIO.fromEither(staticCacheControl(environmentValue)))
+
+  private[be] def staticCacheControl(environmentValue: Option[String]): Either[IllegalArgumentException, CacheControl] =
+    environmentValue.map(_.trim).filter(_.nonEmpty) match
+      case None        => Left(MissingStaticAssetCacheMaxAge())
+      case Some(value) =>
+        value.toIntOption.filter(_ >= 0).map(CacheControl.MaxAge.apply).toRight(InvalidStaticAssetCacheMaxAge(value))
 
   private def bindAddress: UIO[String] =
     System.env("BIND_ADDRESS").orElseSucceed(None).map(bindAddress)
@@ -104,10 +128,12 @@ object Main extends ZIOAppDefault:
     val unit = for
       p <- port
       host <- bindAddress
+      staticCacheCtrl <- staticCacheControl
       environment <- ZIO.environment[BackendEnvironment]
       registry = CapabilityRegistry.fromEnvironment(environment)
-      reservedPatterns = staticRoutes.routes.map(_.routePattern: Any).toSet
-      applicationRoutes <- RouteDiscovery.routes(registry, reservedPatterns).map(staticRoutes ++ _)
+      static = staticRoutes(staticCacheCtrl)
+      reservedPatterns = static.routes.map(_.routePattern: Any).toSet
+      applicationRoutes <- RouteDiscovery.routes(registry, reservedPatterns).map(static ++ _)
       _ <- DatabaseAdmin.ensureDatabase.catchAll: error =>
         ZIO.logWarning(s"Could not ensure the Firestore database: ${error.getMessage}")
       _ <- DatabaseAdmin.ensureSessionTtl.catchAll: error =>

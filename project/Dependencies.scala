@@ -2,10 +2,11 @@
 import sbt._
 
 object Dependencies {
+  val munitVersion = "1.3.4"
   lazy val classGraph = "io.github.classgraph" % "classgraph" % "4.8.181"
   lazy val zioHttp = "dev.zio" %% "zio-http" % "3.11.3"
   lazy val zioLogging = "dev.zio" %% "zio-logging" % "2.5.3"
-  lazy val munit = "org.scalameta" %% "munit" % "1.3.4"
+  lazy val munit = "org.scalameta" %% "munit" % munitVersion
   val zioJsonVersion = "0.9.1"
 
   // Google Cloud: Firestore access-log persistence and OAuth 2.0 code exchange / ID-token verification

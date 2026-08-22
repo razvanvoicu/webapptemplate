@@ -1,10 +1,14 @@
 package sgrv.be
 
+import com.google.gson.JsonParser
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets.UTF_8
 import zio.{Runtime, Task, Unsafe, ZIO}
 import zio.http.{Header, MediaType, Request, Status, URL}
 
 class MainSuite extends munit.FunSuite:
+
+  private val testStaticCacheControl = Header.CacheControl.MaxAge(300)
 
   private def run[A](effect: Task[A]): A =
     Unsafe.unsafe { implicit unsafe =>
@@ -12,9 +16,18 @@ class MainSuite extends munit.FunSuite:
     }
 
   private def resourceText(name: String): String =
+    String(resourceBytes(name), UTF_8)
+
+  private def resourceBytes(name: String): Array[Byte] =
     val input = Option(getClass.getClassLoader.getResourceAsStream(name)).getOrElse(fail(s"Missing resource: $name"))
-    try String(input.readAllBytes(), UTF_8)
+    try input.readAllBytes()
     finally input.close()
+
+  private def pngSize(bytes: Array[Byte]): (Int, Int) =
+    assert(bytes.length >= 24, "PNG is too short to contain an IHDR chunk")
+    assertEquals(bytes.slice(1, 4).map(_.toChar).mkString, "PNG")
+    val dimensions = ByteBuffer.wrap(bytes, 16, 8)
+    dimensions.getInt() -> dimensions.getInt()
 
   test("binds the HTTP server to a given host and port"):
     val config = Main.serverConfig("0.0.0.0", 9000)
@@ -90,6 +103,26 @@ class MainSuite extends munit.FunSuite:
     assert(Main.port(Some("-1")).isLeft)
     assert(Main.port(Some("65536")).isLeft)
 
+  test("requires a non-negative static asset cache duration"):
+    assertEquals(Main.staticCacheControl(Some("300")), Right(Header.CacheControl.MaxAge(300)))
+    assertEquals(Main.staticCacheControl(Some(" 86400 ")), Right(Header.CacheControl.MaxAge(86400)))
+    assertEquals(
+      Main.staticCacheControl(None).swap.toOption.get.getMessage,
+      "Environment variable STATIC_ASSET_CACHE_MAX_AGE_SECONDS is not set or is empty; startup cannot continue."
+    )
+    assertEquals(
+      Main.staticCacheControl(Some("invalid")).swap.toOption.get.getMessage,
+      "Invalid STATIC_ASSET_CACHE_MAX_AGE_SECONDS value 'invalid'. Expected a non-negative integer."
+    )
+    assert(Main.staticCacheControl(Some("-1")).isLeft)
+
+  test("uses a five-minute local cache and a one-day production cache"):
+    val prodEnv = resourceText("prod.env").linesIterator.map(_.trim).toSet
+    val testEnv = resourceText("test.env").linesIterator.map(_.trim).toSet
+
+    assert(prodEnv.contains("STATIC_ASSET_CACHE_MAX_AGE_SECONDS=86400"))
+    assert(testEnv.contains("STATIC_ASSET_CACHE_MAX_AGE_SECONDS=300"))
+
   test("selects the bind address from the environment, defaulting to IPv4 loopback"):
     assertEquals(Main.bindAddress(Some("0.0.0.0")), "0.0.0.0")
     assertEquals(Main.bindAddress(Some("  ")), "127.0.0.1")
@@ -109,23 +142,79 @@ class MainSuite extends munit.FunSuite:
     assertEquals(LoggerConfig.requestSummary(Map.empty), None)
 
   test("loads packaged assets and returns not found for a missing asset"):
-    val index = run(Main.asset("index.html", MediaType.text.html))
+    val index = run(Main.asset("index.html", MediaType.text.html, testStaticCacheControl))
     val content = run(index.body.asString)
-    val missing = run(Main.asset("missing.txt", MediaType.text.plain))
+    val missing = run(Main.asset("missing.txt", MediaType.text.plain, testStaticCacheControl))
 
     assertEquals(index.status, Status.Ok)
     assert(content.contains("<html"))
-    assertEquals(index.headers.get(Header.CacheControl), Some(Header.CacheControl.MaxAge(300)))
+    assert(content.contains("href=\"/favicon.ico\""))
+    assert(content.contains("rel=\"manifest\" href=\"/manifest.webmanifest\""))
+    assertEquals(index.headers.get(Header.CacheControl), Some(testStaticCacheControl))
     assertEquals(missing.status, Status.NotFound)
 
   test("serves a static asset through the application routes"):
-    val routes = run(ZIO.succeed(Main.staticRoutes))
+    val routes = run(ZIO.succeed(Main.staticRoutes(testStaticCacheControl)))
     val request = Request.get(URL.decode("/style.css").toOption.get)
     val response = run(zio.ZIO.scoped(routes.runZIO(request)))
     val content = run(response.body.asString)
     val index = run(zio.ZIO.scoped(routes.runZIO(Request.get(URL.decode("/").toOption.get))))
+    val productionRoutes = run(ZIO.succeed(Main.staticRoutes(Header.CacheControl.MaxAge(86400))))
+    val productionResponse = run(zio.ZIO.scoped(productionRoutes.runZIO(request)))
 
     assertEquals(response.status, Status.Ok)
-    assertEquals(response.headers.get(Header.CacheControl), Some(Header.CacheControl.MaxAge(300)))
+    assertEquals(response.headers.get(Header.CacheControl), Some(testStaticCacheControl))
     assert(content.nonEmpty)
     assertEquals(index.headers.get(Header.CacheControl), Some(Header.CacheControl.NoCache))
+    assertEquals(productionResponse.headers.get(Header.CacheControl), Some(Header.CacheControl.MaxAge(86400)))
+
+  test("packages and serves the favicon as a cached Microsoft icon"):
+    val packaged = resourceBytes("web/favicon.ico")
+    val routes = run(ZIO.succeed(Main.staticRoutes(testStaticCacheControl)))
+    val response = run(ZIO.scoped(routes.runZIO(Request.get(URL.decode("/favicon.ico").toOption.get))))
+    val served = run(response.body.asArray)
+
+    assert(packaged.length > 4)
+    assertEquals(packaged.take(4).toSeq, Seq[Byte](0, 0, 1, 0))
+    assertEquals(response.status, Status.Ok)
+    assertEquals(
+      response.headers.get(Header.ContentType),
+      Some(Header.ContentType(MediaType.image.`vnd.microsoft.icon`))
+    )
+    assertEquals(response.headers.get(Header.CacheControl), Some(testStaticCacheControl))
+    assertEquals(served.toSeq, packaged.toSeq)
+
+  test("packages and serves an installable PWA manifest with the configured cache duration"):
+    val routes = run(ZIO.succeed(Main.staticRoutes(testStaticCacheControl)))
+    val response = run(ZIO.scoped(routes.runZIO(Request.get(URL.decode("/manifest.webmanifest").toOption.get))))
+    val manifest = run(response.body.asString)
+    val json = JsonParser.parseString(manifest).getAsJsonObject
+    val icons = json.getAsJsonArray("icons")
+    val iconSizes = (0 until icons.size()).map(index => icons.get(index).getAsJsonObject.get("sizes").getAsString).toSet
+
+    assertEquals(response.status, Status.Ok)
+    assertEquals(
+      response.headers.get(Header.ContentType),
+      Some(Header.ContentType(MediaType.application.`manifest+json`))
+    )
+    assertEquals(response.headers.get(Header.CacheControl), Some(testStaticCacheControl))
+    assertEquals(json.get("name").getAsString, "Web App Template")
+    assertEquals(json.get("start_url").getAsString, "/")
+    assertEquals(json.get("scope").getAsString, "/")
+    assertEquals(json.get("display").getAsString, "standalone")
+    assertEquals(iconSizes, Set("192x192", "512x512"))
+
+  test("packages and serves the required PWA icons as PNG files"):
+    val routes = run(ZIO.succeed(Main.staticRoutes(testStaticCacheControl)))
+
+    Seq("icon-192.png" -> (192, 192), "icon-512.png" -> (512, 512)).foreach { case (fileName, expectedSize) =>
+      val packaged = resourceBytes(s"web/$fileName")
+      val response = run(ZIO.scoped(routes.runZIO(Request.get(URL.decode(s"/$fileName").toOption.get))))
+      val served = run(response.body.asArray)
+
+      assertEquals(pngSize(packaged), expectedSize)
+      assertEquals(response.status, Status.Ok)
+      assertEquals(response.headers.get(Header.ContentType), Some(Header.ContentType(MediaType.image.png)))
+      assertEquals(response.headers.get(Header.CacheControl), Some(testStaticCacheControl))
+      assertEquals(served.toSeq, packaged.toSeq)
+    }

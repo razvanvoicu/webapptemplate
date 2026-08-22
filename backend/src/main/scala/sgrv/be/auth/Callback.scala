@@ -21,7 +21,7 @@ object Callback extends BackendPlugin:
     Routes(Method.GET / "auth" / "callback" -> handler((request: Request) => apply(request)))
 
   private[auth] val sessionCookieName = "session"
-  private val sessionLifetime = 7.days
+  private[auth] val sessionLifetime = 7.days
 
   private def apply(request: Request): ZIO[Requires, Nothing, Response] =
     val login =
@@ -73,7 +73,7 @@ object Callback extends BackendPlugin:
     * @return
     *   An HTTP cookie
     */
-  private def sessionCookie(token: String, secure: Boolean): Cookie.Response =
+  private[auth] def sessionCookie(token: String, secure: Boolean): Cookie.Response =
     Cookie.Response(
       name = sessionCookieName,
       content = token,

@@ -130,6 +130,14 @@ trait SessionStore:
       expiresAt: Instant
   ): Task[Unit]
   def find(sessionKey: String, now: Instant): Task[Option[SessionUser]]
+
+  /** Reads a retained session record without applying its active-session expiry, so its refresh token can be validated
+    * before renewal. Firestore TTL may already have removed the record.
+    */
+  def findForRefresh(sessionKey: String): Task[Option[SessionUser]]
+
+  /** Extends the active-session expiry only after Google has accepted the stored refresh token. */
+  def renew(sessionKey: String, expiresAt: Instant): Task[Unit]
   def invalidate(sessionKey: String): Task[Unit]
 
 private[be] object SessionStore:
@@ -143,6 +151,12 @@ private[be] object SessionStore:
 
   def find(sessionKey: String, now: Instant): ZIO[SessionStore, Throwable, Option[SessionUser]] =
     ZIO.serviceWithZIO[SessionStore](_.find(sessionKey, now))
+
+  def findForRefresh(sessionKey: String): ZIO[SessionStore, Throwable, Option[SessionUser]] =
+    ZIO.serviceWithZIO[SessionStore](_.findForRefresh(sessionKey))
+
+  def renew(sessionKey: String, expiresAt: Instant): ZIO[SessionStore, Throwable, Unit] =
+    ZIO.serviceWithZIO[SessionStore](_.renew(sessionKey, expiresAt))
 
   def invalidate(sessionKey: String): ZIO[SessionStore, Throwable, Unit] =
     ZIO.serviceWithZIO[SessionStore](_.invalidate(sessionKey))
@@ -177,6 +191,25 @@ private[be] object SessionStore:
       yield ()
 
     override def find(sessionKey: String, now: Instant): Task[Option[SessionUser]] =
+      read(sessionKey).map(_.collect { case (user, expiresAt) if now.isBefore(expiresAt) => user })
+
+    override def findForRefresh(sessionKey: String): Task[Option[SessionUser]] =
+      read(sessionKey).map(_.map(_._1))
+
+    override def renew(sessionKey: String, expiresAt: Instant): Task[Unit] =
+      normalized(sessionKey) match
+        case None      => ZIO.fail(new IllegalArgumentException("The session key is empty"))
+        case Some(key) =>
+          GoogleFuture
+            .fromApiFuture(
+              firestore
+                .collection(SessionSchema.collection)
+                .document(key)
+                .update(SessionSchema.expiresAt, timestamp(expiresAt))
+            )
+            .unit
+
+    private def read(sessionKey: String): Task[Option[(SessionUser, Instant)]] =
       normalized(sessionKey) match
         case None      => ZIO.none
         case Some(key) =>
@@ -192,10 +225,16 @@ private[be] object SessionStore:
                   val name = normalized(session.getString("name"))
                   val refreshToken = normalized(session.getString("refreshToken"))
                   val accessTokenForRevocation = normalized(session.getString("accessTokenForRevocation"))
-                  if storedKey.contains(key) && expiresAt.exists(now.isBefore) then
-                    email.map(address =>
-                      SessionUser(address, name.getOrElse(address), refreshToken, accessTokenForRevocation)
-                    )
+                  if storedKey.contains(key) then
+                    for
+                      address <- email
+                      expiry <- expiresAt
+                    yield SessionUser(
+                      address,
+                      name.getOrElse(address),
+                      refreshToken,
+                      accessTokenForRevocation
+                    ) -> expiry
                   else None
 
     override def invalidate(sessionKey: String): Task[Unit] =

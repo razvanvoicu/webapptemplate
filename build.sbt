@@ -126,7 +126,8 @@ lazy val frontend = (project in file("frontend"))
     scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.NoModule)),
     libraryDependencies ++= Seq(
       "com.raquo" %%% "laminar" % laminarVersion,
-      "org.scala-js" %%% "scalajs-dom" % scalajsDomVersion
+      "org.scala-js" %%% "scalajs-dom" % scalajsDomVersion,
+      "org.scalameta" %%% "munit" % munitVersion % Test
     )
   )
 
@@ -202,6 +203,18 @@ def stageDockerContext(
   IO.delete(dockerDir)
   IO.createDirectory(dockerDir / "lib")
   IO.createDirectory(dockerDir / "adc")
+  val applicationJar = new java.util.jar.JarFile(appJar)
+  try {
+    val requiredWebAssets = Seq(
+      "web/favicon.ico",
+      "web/icon-192.png",
+      "web/icon-512.png",
+      "web/manifest.webmanifest"
+    )
+    val missingWebAssets = requiredWebAssets.filter(applicationJar.getJarEntry(_) == null)
+    if (missingWebAssets.nonEmpty)
+      sys.error(s"Application JAR ${appJar.getAbsolutePath} is missing ${missingWebAssets.mkString(", ")}")
+  } finally applicationJar.close()
   IO.copyFile(appJar, dockerDir / "app.jar")
   runtimeJars.foreach(jar => IO.copyFile(jar, dockerDir / "lib" / jar.getName))
 
