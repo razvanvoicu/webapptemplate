@@ -1,7 +1,7 @@
 import Dependencies._
 import org.scalajs.linker.interface.ModuleKind
-import sbtcrossproject.CrossPlugin.autoImport.*
-import scalajscrossproject.ScalaJSCrossPlugin.autoImport.*
+//import sbtcrossproject.CrossPlugin.autoImport.*
+//import scalajscrossproject.ScalaJSCrossPlugin.autoImport.*
 
 // One ignored, machine-specific locator points to a shared configuration file. Its contents are reread by every
 // task, while relative secret paths inside it are resolved from the shared file's directory.
@@ -93,9 +93,9 @@ addCommandAlias(
 )
 
 ThisBuild / scalaVersion := "3.8.4"
-ThisBuild / version := "0.1.0-SNAPSHOT"
-ThisBuild / organization := "com.example"
-ThisBuild / organizationName := "example"
+ThisBuild / version := "1.0"
+ThisBuild / organization := "sg.raz"
+ThisBuild / organizationName := "raz"
 ThisBuild / scalacOptions ++= Seq(
   "-deprecation",
   "-feature",
