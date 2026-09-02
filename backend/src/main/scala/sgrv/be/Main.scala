@@ -7,8 +7,8 @@ import zio.http.*
 import zio.logging.*
 
 private[be] object Config:
-  val serverShutdownTimeout = 8.seconds
-  val processShutdownTimeout = 9.seconds
+  val serverShutdownTimeout: Duration = 8.seconds
+  val processShutdownTimeout: Duration = 9.seconds
   final case class MissingPort()
       extends IllegalArgumentException("Environment variable PORT is not set or is empty; startup cannot continue.")
   final case class InvalidPort(source: String, value: String)
@@ -23,8 +23,6 @@ private[be] object Config:
       extends IllegalArgumentException(
         s"Invalid STATIC_ASSET_CACHE_MAX_AGE_SECONDS value '$value'. Expected a non-negative integer."
       )
-  // 127.0.0.1 suits a same-host reverse proxy or bare-VM deployment; a container needs 0.0.0.0 (see BIND_ADDRESS
-  // below), since a process bound only to loopback is unreachable from outside its own network namespace.
   val defaultBindAddress = "127.0.0.1"
 
 private[be] object LoggerConfig:
